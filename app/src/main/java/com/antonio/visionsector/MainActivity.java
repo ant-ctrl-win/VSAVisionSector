@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -35,6 +36,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    private TrackingOverlayView trackingOverlay;
     private VsaVector reusableQueryVector;
     private static final String TAG = "VSA_Pipeline";
     private static final int CAMERA_PERMISSION_CODE = 101;
@@ -67,10 +69,34 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+
         viewFinder = findViewById(R.id.viewFinder);
         tvVerdict = findViewById(R.id.tvVerdict);
         tvConfidence = findViewById(R.id.tvConfidence);
         fabLearn = findViewById(R.id.fabLearn);
+
+        // AGGIUNGI QUESTA RIGA PER COLLEGARE LA VISTA GRAFICA:
+        trackingOverlay = findViewById(R.id.trackingOverlay);
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+/**
+ * clearSavedArchetypes(); Per ripulire gli archetipi salvati;
+ * Megli associare la funziona ad un pulsante
+ */
+
+// --- FUNZIONE DI RESET AUTOMATICO DEGLI ARCHETIPI ---
+        // Esegui l'app una volta con questa riga attiva per svuotare i vecchi salvataggi.
+        // Una volta pulito, puoi commentarla o associarla a un pulsante di Reset.
+
+        clearSavedArchetypes();
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
 
         // Disabilitato di default finché il motore non è pronto
         fabLearn.setEnabled(false);
@@ -320,93 +346,35 @@ public class MainActivity extends AppCompatActivity {
     }
 
 
-    /**
     public void processCameraFrame(Bitmap bitmap) {
         if (cnnExtractor == null || vsaBridge == null || archetypes == null || archetypes.isEmpty()) return;
 
         try {
-            long startTotal = System.currentTimeMillis();
+            // 1. CREAZIONE DEL QUADRATO PERFETTO DAL FOTOGRAMMA
+            int minDim = Math.min(bitmap.getWidth(), bitmap.getHeight());
+            int startX = (bitmap.getWidth() - minDim) / 2;
+            int startY = (bitmap.getHeight() - minDim) / 2;
+            Bitmap squareBitmap = Bitmap.createBitmap(bitmap, startX, startY, minDim, minDim);
 
-            // 1. STESSO IDENTICO RITAGLIO DEL METODO DI APPRENDIMENTO
-            int cropSize = Math.min(bitmap.getWidth(), bitmap.getHeight()) / 2;
-            int startX = (bitmap.getWidth() - cropSize) / 2;
-            int startY = (bitmap.getHeight() - cropSize) / 2;
-
-            Bitmap cropped = Bitmap.createBitmap(bitmap, startX, startY, cropSize, cropSize);
-
-            // 2. L'OCCHIO
+            // -- L'OCCHIO (Guarda solo il quadrato) --
             long startCNN = System.currentTimeMillis();
-            float[] features = cnnExtractor.extractGlobalFeatures(cropped);
-            long timeCNN = System.currentTimeMillis() - startCNN;
-
-            // 3. IL CERVELLO
-            long startVSA = System.currentTimeMillis();
-            vsaBridge.projectFeatureVector(features, continuousBuffer);
-
-            for (int i = 0; i < 157; i++) bscBlocksBuffer[i] = 0L;
-            for (int i = 0; i < 10000; i++) {
-                if (continuousBuffer[i] > 0) {
-                    int blockIndex = i / 64;
-                    int bitIndex = i % 64;
-                    bscBlocksBuffer[blockIndex] |= (1L << bitIndex);
-                }
-            }
-            reusableQueryVector.setBlocks(bscBlocksBuffer);
-
-            // 4. RICONOSCIMENTO
-            String bestMatch = "Nessun target";
-            double bestSim = 0.35; // Soglia di sicurezza
-
-            for (Map.Entry<String, VsaVector> entry : archetypes.entrySet()) {
-                double sim = reusableQueryVector.getCosineSimilarity(entry.getValue());
-                if (sim > bestSim) {
-                    bestSim = sim;
-                    bestMatch = entry.getKey().replace("_", " ");
-                }
-            }
-
-            long timeVSA = System.currentTimeMillis() - startVSA;
-            long totalTime = System.currentTimeMillis() - startTotal;
-
-            Log.d(TAG, "TIMING -> CNN: " + timeCNN + " ms | VSA: " + timeVSA + " ms | TOTALE: " + totalTime + " ms");
-
-            // 5. AGGIORNAMENTO SCHERMO
-            final String finalVerdict = bestMatch.equals("Nessun target") ? bestMatch : bestMatch + " (" + String.format("%.2f", bestSim) + ")";
-            final String finalConfidence = "Inferenza Centrale: " + totalTime + " ms";
-
-            runOnUiThread(() -> {
-                tvVerdict.setText(finalVerdict);
-                tvConfidence.setText(finalConfidence);
-            });
-
-        } catch (Exception e) {
-            Log.e(TAG, "Errore nell'inferenza centrale", e);
-        }
-    }
-    */
-
-    public void processCameraFrame(Bitmap bitmap) {
-        if (cnnExtractor == null || vsaBridge == null || archetypes == null || archetypes.isEmpty()) return;
-
-        try {
-            // -- L'OCCHIO --
-            long startCNN = System.currentTimeMillis();
-            float[] spatialGrid = cnnExtractor.extractSpatialFeatures(bitmap);
+            float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap);
             long timeCNN = System.currentTimeMillis() - startCNN;
 
             // -- IL CERVELLO --
             long startVSA = System.currentTimeMillis();
 
-            // Taccuini per l'NMS (Non-Maximum Suppression)
-            Map<String, Double> bestSims = new HashMap<>();
-            Map<String, Integer> bestX = new HashMap<>();
-            Map<String, Integer> bestY = new HashMap<>();
+            // Strutture per unire le celle adiacenti (Macro-Rettangoli)
+            Map<String, Double> maxSims = new HashMap<>();
+            Map<String, Integer> minX = new HashMap<>();
+            Map<String, Integer> minY = new HashMap<>();
+            Map<String, Integer> maxX = new HashMap<>();
+            Map<String, Integer> maxY = new HashMap<>();
 
             for (int row = 0; row < 7; row++) {
                 for (int col = 0; col < 7; col++) {
                     int offset = (row * 7 + col) * 1280;
 
-                    // Proiezione e Zero-Allocation Binarization
                     vsaBridge.projectSpatialCellToContinuous(spatialGrid, offset, continuousBuffer);
 
                     for (int i = 0; i < 157; i++) bscBlocksBuffer[i] = 0L;
@@ -419,100 +387,75 @@ public class MainActivity extends AppCompatActivity {
                     }
                     reusableQueryVector.setBlocks(bscBlocksBuffer);
 
-                    // Confronto Multiplo
+                    // Valutazione contro tutti gli archetipi
                     for (Map.Entry<String, VsaVector> entry : archetypes.entrySet()) {
                         String name = entry.getKey();
                         double similarity = reusableQueryVector.getCosineSimilarity(entry.getValue());
 
-                        if (similarity > 0.35) { // Soglia
-                            double currentBest = bestSims.containsKey(name) ? bestSims.get(name) : 0.0;
-                            if (similarity > currentBest) {
-                                bestSims.put(name, similarity);
-                                bestX.put(name, col);
-                                bestY.put(name, row);
-                            }
+                        if (similarity > 0.35) { // Se l'oggetto è in questa cella
+                            // Aggiorniamo la confidenza massima trovata
+// Aggiorniamo la confidenza massima trovata
+                            double currentMax = maxSims.containsKey(name) ? maxSims.get(name) : 0.0;
+                            maxSims.put(name, Math.max(currentMax, similarity));
+
+                            // --- IL TRUCCO DELLA TRASPOSTA ---
+                            // Invertiamo col e row: X diventa row, Y diventa col
+                            int screenX = 6 - row;
+                            int screenY = col;
+
+                            minX.put(name, minX.containsKey(name) ? Math.min(minX.get(name), screenX) : screenX);
+                            minY.put(name, minY.containsKey(name) ? Math.min(minY.get(name), screenY) : screenY);
+                            maxX.put(name, maxX.containsKey(name) ? Math.max(maxX.get(name), screenX) : screenX);
+                            maxY.put(name, maxY.containsKey(name) ? Math.max(maxY.get(name), screenY) : screenY);
+                            // ---------------------------------
                         }
                     }
                 }
             }
 
-            // -- RENDERING --
+// -- RENDERING --
             StringBuilder multiVerdict = new StringBuilder();
-            int oggettiRilevatiCount = 0;
 
-            for (String name : bestSims.keySet()) {
+            // Prepariamo la lista di oggetti da passare alla vista grafica
+            List<TrackingOverlayView.DetectedItem> itemsForOverlay = new ArrayList<>();
+
+            for (String name : maxSims.keySet()) {
+                int col = maxX.get(name);
+                int row = maxY.get(name);
+                double sim = maxSims.get(name);
+
                 multiVerdict.append(name.replace("_", " "))
-                        .append(" [X:").append(bestX.get(name))
-                        .append(", Y:").append(bestY.get(name)).append("] ")
-                        .append(String.format("(%.2f)\n", bestSims.get(name)));
-                oggettiRilevatiCount++;
+                        .append(" [X:").append(col).append(", Y:").append(row).append("] ")
+                        .append(String.format("(%.2f)\n", sim));
+
+                // Popoliamo l'elemento grafico con la cella esatta
+                itemsForOverlay.add(new TrackingOverlayView.DetectedItem(
+                        name, minX.get(name), minY.get(name), maxX.get(name), maxY.get(name), sim
+                ));
             }
 
             long timeVSA = System.currentTimeMillis() - startVSA;
             long totalTime = timeCNN + timeVSA;
 
-            Log.d(TAG, "TIMING -> CNN: " + timeCNN + " ms | VSA: " + timeVSA + " ms | TOTALE: " + totalTime + " ms");
-
-            final String finalVerdict = (oggettiRilevatiCount > 0) ? multiVerdict.toString() : "Scansione 7x7 attiva... Nessun target.";
-            final String finalConfidence = "Tempo Frame: " + totalTime + " ms";
-
+            // Rimuoviamo la variabile primitiva mutabile e usiamo direttamente la lista
+            // che dentro le Lambda si comporta in modo stabile.
             runOnUiThread(() -> {
-                tvVerdict.setText(finalVerdict);
-                tvConfidence.setText(finalConfidence);
+                if (!itemsForOverlay.isEmpty()) {
+                    // itemsForOverlay.size() ci dà il conteggio esatto in tempo reale!
+                    tvVerdict.setText("Rilevati: " + itemsForOverlay.size());
+                } else {
+                    tvVerdict.setText("Scansione in corso...");
+                }
+                tvConfidence.setText("Tempo Frame: " + totalTime + " ms");
+                trackingOverlay.updateDetections(itemsForOverlay);
             });
 
         } catch (Exception e) {
-            Log.e(TAG, "Errore nella scansione spaziale 7x7", e);
+            Log.e(TAG, "Errore nella scansione spaziale quadrata", e);
         }
     }
 
-//    public void learnNewCustomObject(String className, List<Bitmap> sampleImages) {
-//        if (sampleImages == null || sampleImages.isEmpty()) return;
-//
-//        inferenceExecutor.execute(() -> {
-//            try {
-//                long startLearning = System.currentTimeMillis();
-//                Bitmap bitmap = sampleImages.get(0);
-//
-//                // 1. IL RITAGLIO FISSO AL CENTRO (Focus Zone)
-//                // Usiamo un quadrato pari alla metà del lato più corto dello schermo
-//                int cropSize = Math.min(bitmap.getWidth(), bitmap.getHeight()) / 2;
-//                int startX = (bitmap.getWidth() - cropSize) / 2;
-//                int startY = (bitmap.getHeight() - cropSize) / 2;
-//
-//                Bitmap cropped = Bitmap.createBitmap(bitmap, startX, startY, cropSize, cropSize);
-//
-//                // 2. Estrazione e VSA
-//                float[] features = cnnExtractor.extractGlobalFeatures(cropped);
-//                double[] tempContinuous = new double[10000];
-//                vsaBridge.projectFeatureVector(features, tempContinuous);
-//
-//                long[] newBscBlocks = new long[157];
-//                for (int i = 0; i < 10000; i++) {
-//                    if (tempContinuous[i] > 0) {
-//                        int blockIndex = i / 64;
-//                        int bitIndex = i % 64;
-//                        newBscBlocks[blockIndex] |= (1L << bitIndex);
-//                    }
-//                }
-//
-//                VsaVector newArchetype = new VsaVector(newBscBlocks);
-//                archetypes.put(className, newArchetype);
-//                saveUserArchetypeToStorage(className, newArchetype);
-//
-//                long duration = System.currentTimeMillis() - startLearning;
-//                Log.d(TAG, "Nuova classe '" + className + "' memorizzata in " + duration + " ms.");
-//
-//                runOnUiThread(() -> {
-//                    Toast.makeText(MainActivity.this, "Appreso: " + className, Toast.LENGTH_SHORT).show();
-//                    tvVerdict.setText(className.replace("_", " "));
-//                });
-//
-//            } catch (Exception e) {
-//                Log.e(TAG, "Errore durante l'apprendimento centrale", e);
-//            }
-//        });
-//    }
+
 
 
     /**
@@ -620,6 +563,8 @@ public class MainActivity extends AppCompatActivity {
 
 
     public void learnNewCustomObject(String className, List<Bitmap> sampleImages) {
+
+
         if (sampleImages == null || sampleImages.isEmpty()) return;
 
         inferenceExecutor.execute(() -> {
@@ -627,8 +572,14 @@ public class MainActivity extends AppCompatActivity {
                 long startLearning = System.currentTimeMillis();
                 Bitmap bitmap = sampleImages.get(0);
 
-                // 1. Estrazione Mappa Spaziale 7x7
-                float[] spatialGrid = cnnExtractor.extractSpatialFeatures(bitmap);
+                int minDim = Math.min(bitmap.getWidth(), bitmap.getHeight());
+                int startX = (bitmap.getWidth() - minDim) / 2;
+                int startY = (bitmap.getHeight() - minDim) / 2;
+                Bitmap squareBitmap = Bitmap.createBitmap(bitmap, startX, startY, minDim, minDim);
+                float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap); // Passa squareBitmap!
+
+//                // 1. Estrazione Mappa Spaziale 7x7
+//                float[] spatialGrid = cnnExtractor.extractSpatialFeatures(bitmap);
 
                 // 2. Isoliamo SOLO la cella centrale [X:3, Y:3] -> Indice 24
                 int centerOffset = (3 * 7 + 3) * 1280;
@@ -664,6 +615,9 @@ public class MainActivity extends AppCompatActivity {
             }
         });
     }
+
+
+
     private synchronized void saveUserArchetypeToStorage(String className, VsaVector vector) {
         Map<String, VsaVector> userClasses = loadUserArchetypesFromStorage();
         userClasses.put(className, vector);
@@ -737,4 +691,22 @@ public class MainActivity extends AppCompatActivity {
         if (cnnExtractor != null) cnnExtractor.close();
         inferenceExecutor.shutdown();
     }
+
+    private void clearSavedArchetypes() {
+        if (archetypes != null) {
+            archetypes.clear();
+        }
+        File dir = getFilesDir();
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.getName().endsWith(".txt") || file.getName().contains("archetype")) {
+                    file.delete();
+                }
+            }
+        }
+        Log.d("VSA_Pipeline", "Tutti gli archetipi residui sono stati cancellati dal disco.");
+    }
+
+
 }
