@@ -9,7 +9,7 @@ public class VsaVector {
     public static final int DIMENSIONS = 10000;
     private static final int ARRAY_SIZE = (DIMENSIONS + 63) / 64;
 
-    private final long[] blocks;
+    private long[] blocks;
 
     /**
      * Costruisce un vettore BSC a partire da un array di blocchi a 64 bit.
@@ -62,5 +62,16 @@ public class VsaVector {
 
     public long[] getBlocks() {
         return blocks;
+    }
+
+    /**
+     * Setter ottimizzato "Zero-Allocation".
+     * Invece di cambiare il puntatore dell'array, sovrascrive fisicamente
+     * i 157 long esistenti in memoria, evitando di risvegliare il Garbage Collector.
+     */
+    public void setBlocks(long[] newBlocks) {
+        if (newBlocks != null && newBlocks.length == 157) {
+            System.arraycopy(newBlocks, 0, this.blocks, 0, 157);
+        }
     }
 }

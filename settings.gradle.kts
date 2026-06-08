@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VsaTest"
+rootProject.name = "VsaVisionSector"
 include(":app")

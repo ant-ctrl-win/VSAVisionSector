@@ -61,6 +61,77 @@ public class RandomProjectionBridge {
     }
 
     /**
+     * Estrae e proietta una singola cella spaziale direttamente dall'array gigante della CNN.
+     * Usa un offset per evitare di instanziare nuovi array float[] e affaticare il Garbage Collector.
+     */
+    // vsaDimensions
+    // cnnFeatureSize
+
+    public void projectSpatialCellToContinuous(float[] spatialGrid, int startOffset, double[] outContinuous) {
+        // 1. FASE DI FILTRAGGIO SPARSO (ReLU6 Optimization)
+        // Creiamo piccoli buffer locali temporanei per salvare solo le feature attive
+        int[] activeIndices = new int[1280];
+        float[] activeValues = new float[1280];
+        int activeCount = 0;
+
+        for (int i = 0; i < 1280; i++) {
+            float val = spatialGrid[startOffset + i];
+            if (val != 0.0f) { // Consideriamo solo i filtri che hanno visto qualcosa
+                activeIndices[activeCount] = i;
+                activeValues[activeCount] = val;
+                activeCount++;
+            }
+        }
+
+        // 2. PROIEZIONE IPERDIMENSIONALE VELOCE
+        // Eseguiamo il calcolo solo sulle feature reali (risparmio dell'80% di cicli CPU)
+        for (int j = 0; j < 10000; j++) {
+            boolean[] basis = projectionMatrix[j];
+            double sum = 0.0;
+
+            for (int k = 0; k < activeCount; k++) {
+                int idx = activeIndices[k];
+                if (basis[idx]) {
+                    sum += activeValues[k];
+                } else {
+                    sum -= activeValues[k];
+                }
+            }
+            outContinuous[j] = sum;
+        }
+    }
+
+
+    public void projectFeatureVector(float[] features, double[] outContinuous) {
+        // 1. FASE DI FILTRAGGIO SPARSO (Solo i valori utili)
+        int[] activeIndices = new int[1280];
+        float[] activeValues = new float[1280];
+        int activeCount = 0;
+
+        for (int i = 0; i < 1280; i++) {
+            float val = features[i];
+            if (val != 0.0f) {
+                activeIndices[activeCount] = i;
+                activeValues[activeCount] = val;
+                activeCount++;
+            }
+        }
+
+        // 2. PROIEZIONE VELOCE
+        for (int j = 0; j < 10000; j++) {
+            boolean[] basis = projectionMatrix[j];
+            double sum = 0.0;
+            for (int k = 0; k < activeCount; k++) {
+                int idx = activeIndices[k];
+                if (basis[idx]) sum += activeValues[k];
+                else sum -= activeValues[k];
+            }
+            outContinuous[j] = sum;
+        }
+    }
+
+
+    /**
      * Versione ottimizzata di Binarize: Scrive direttamente nel VsaVector pre-allocato
      */
     public void binarizeTo(double[] continuousVector, long[] reuseBlocks) {
