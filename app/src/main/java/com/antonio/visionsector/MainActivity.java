@@ -350,108 +350,73 @@ public class MainActivity extends AppCompatActivity {
         if (cnnExtractor == null || vsaBridge == null || archetypes == null || archetypes.isEmpty()) return;
 
         try {
-            // 1. CREAZIONE DEL QUADRATO PERFETTO DAL FOTOGRAMMA
+            // 1. IL QUADRATO PERFETTO DAL FOTOGRAMMA
             int minDim = Math.min(bitmap.getWidth(), bitmap.getHeight());
             int startX = (bitmap.getWidth() - minDim) / 2;
             int startY = (bitmap.getHeight() - minDim) / 2;
             Bitmap squareBitmap = Bitmap.createBitmap(bitmap, startX, startY, minDim, minDim);
 
-            // -- L'OCCHIO (Guarda solo il quadrato) --
+            // 2. L'OCCHIO
             long startCNN = System.currentTimeMillis();
             float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap);
             long timeCNN = System.currentTimeMillis() - startCNN;
 
-            // -- IL CERVELLO --
+            // 3. IL CERVELLO (Solo la cella centrale [3,3])
             long startVSA = System.currentTimeMillis();
+            int offset = (3 * 7 + 3) * 1280;
+            vsaBridge.projectSpatialCellToContinuous(spatialGrid, offset, continuousBuffer);
 
-            // Strutture per unire le celle adiacenti (Macro-Rettangoli)
-            Map<String, Double> maxSims = new HashMap<>();
-            Map<String, Integer> minX = new HashMap<>();
-            Map<String, Integer> minY = new HashMap<>();
-            Map<String, Integer> maxX = new HashMap<>();
-            Map<String, Integer> maxY = new HashMap<>();
-
-            for (int row = 0; row < 7; row++) {
-                for (int col = 0; col < 7; col++) {
-                    int offset = (row * 7 + col) * 1280;
-
-                    vsaBridge.projectSpatialCellToContinuous(spatialGrid, offset, continuousBuffer);
-
-                    for (int i = 0; i < 157; i++) bscBlocksBuffer[i] = 0L;
-                    for (int i = 0; i < 10000; i++) {
-                        if (continuousBuffer[i] > 0) {
-                            int blockIndex = i / 64;
-                            int bitIndex = i % 64;
-                            bscBlocksBuffer[blockIndex] |= (1L << bitIndex);
-                        }
-                    }
-                    reusableQueryVector.setBlocks(bscBlocksBuffer);
-
-                    // Valutazione contro tutti gli archetipi
-                    for (Map.Entry<String, VsaVector> entry : archetypes.entrySet()) {
-                        String name = entry.getKey();
-                        double similarity = reusableQueryVector.getCosineSimilarity(entry.getValue());
-
-                        if (similarity > 0.25) { // Se l'oggetto è in questa cella
-
-                        // Aggiorniamo la confidenza massima trovata
-                            double currentMax = maxSims.containsKey(name) ? maxSims.get(name) : 0.0;
-                            maxSims.put(name, Math.max(currentMax, similarity));
-
-                            // --- IL TRUCCO DELLA TRASPOSTA ---
-                            // Invertiamo col e row: X diventa row, Y diventa col
-                            int screenX = 6 - row;
-                            int screenY = col;
-
-                            minX.put(name, minX.containsKey(name) ? Math.min(minX.get(name), screenX) : screenX);
-                            minY.put(name, minY.containsKey(name) ? Math.min(minY.get(name), screenY) : screenY);
-                            maxX.put(name, maxX.containsKey(name) ? Math.max(maxX.get(name), screenX) : screenX);
-                            maxY.put(name, maxY.containsKey(name) ? Math.max(maxY.get(name), screenY) : screenY);
-                            // ---------------------------------
-                        }
-                    }
+            for (int i = 0; i < 157; i++) bscBlocksBuffer[i] = 0L;
+            for (int i = 0; i < 10000; i++) {
+                if (continuousBuffer[i] > 0) {
+                    int blockIndex = i / 64;
+                    int bitIndex = i % 64;
+                    bscBlocksBuffer[blockIndex] |= (1L << bitIndex);
                 }
             }
+            reusableQueryVector.setBlocks(bscBlocksBuffer);
 
-// -- RENDERING --
-            StringBuilder multiVerdict = new StringBuilder();
-
-            // Prepariamo la lista di oggetti da passare alla vista grafica
-            List<TrackingOverlayView.DetectedItem> itemsForOverlay = new ArrayList<>();
-
-            for (String name : maxSims.keySet()) {
-                int col = maxX.get(name);
-                int row = maxY.get(name);
-                double sim = maxSims.get(name);
-
-                multiVerdict.append(name.replace("_", " "))
-                        .append(" [X:").append(col).append(", Y:").append(row).append("] ")
-                        .append(String.format("(%.2f)\n", sim));
-
-                // Popoliamo l'elemento grafico con la cella esatta
-                itemsForOverlay.add(new TrackingOverlayView.DetectedItem(
-                        name, minX.get(name), minY.get(name), maxX.get(name), maxY.get(name), sim
-                ));
+            // 4. RICONOSCIMENTO (Cerca il miglior match)
+            String bestMatch = null;
+            double bestSim = 0.25; // Soglia di sicurezza
+            for (Map.Entry<String, VsaVector> entry : archetypes.entrySet()) {
+                double sim = reusableQueryVector.getCosineSimilarity(entry.getValue());
+                if (sim > bestSim) {
+                    bestSim = sim;
+                    bestMatch = entry.getKey();
+                }
             }
 
             long timeVSA = System.currentTimeMillis() - startVSA;
             long totalTime = timeCNN + timeVSA;
 
-            // Rimuoviamo la variabile primitiva mutabile e usiamo direttamente la lista
-            // che dentro le Lambda si comporta in modo stabile.
+            // 5. PREPARAZIONE PER L'OVERLAY (Il rettangolo verde 5x5)
+            List<TrackingOverlayView.DetectedItem> itemsForOverlay = new ArrayList<>();
+            if (bestMatch != null) {
+                // Usa le coordinate da 1 a 5 per riempire il tuo mirino giallo!
+                itemsForOverlay.add(new TrackingOverlayView.DetectedItem(
+                        bestMatch.replace("_", " "), 1, 1, 5, 5, bestSim
+                ));
+            }
+
+            // LE COPIE "FINAL" PER EVITARE L'ERRORE DI JAVA
+            final String finalMatch = bestMatch;
+            final long finalTime = totalTime;
+            final List<TrackingOverlayView.DetectedItem> finalItems = itemsForOverlay;
+
+            // 6. AGGIORNAMENTO UI
             runOnUiThread(() -> {
-                if (!itemsForOverlay.isEmpty()) {
-                    // itemsForOverlay.size() ci dà il conteggio esatto in tempo reale!
-                    tvVerdict.setText("Rilevati: " + itemsForOverlay.size());
+                if (finalMatch != null) {
+                    tvVerdict.setText("Bersaglio: " + finalMatch.replace("_", " "));
                 } else {
-                    tvVerdict.setText("Scansione in corso...");
+                    tvVerdict.setText("Mirino in attesa...");
                 }
-                tvConfidence.setText("Tempo Frame: " + totalTime + " ms");
-                trackingOverlay.updateDetections(itemsForOverlay);
+                tvConfidence.setText("Tempo: " + finalTime + " ms");
+                trackingOverlay.updateDetections(finalItems);
             });
 
         } catch (Exception e) {
-            Log.e(TAG, "Errore nella scansione spaziale quadrata", e);
+            Log.e(TAG, "Errore nella scansione", e);
         }
     }
 
@@ -563,8 +528,6 @@ public class MainActivity extends AppCompatActivity {
 
 
     public void learnNewCustomObject(String className, List<Bitmap> sampleImages) {
-
-
         if (sampleImages == null || sampleImages.isEmpty()) return;
 
         inferenceExecutor.execute(() -> {
@@ -572,22 +535,21 @@ public class MainActivity extends AppCompatActivity {
                 long startLearning = System.currentTimeMillis();
                 Bitmap bitmap = sampleImages.get(0);
 
+                // 1. IL QUADRATO PERFETTO DAL FOTOGRAMMA
                 int minDim = Math.min(bitmap.getWidth(), bitmap.getHeight());
                 int startX = (bitmap.getWidth() - minDim) / 2;
                 int startY = (bitmap.getHeight() - minDim) / 2;
                 Bitmap squareBitmap = Bitmap.createBitmap(bitmap, startX, startY, minDim, minDim);
-                float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap); // Passa squareBitmap!
 
-//                // 1. Estrazione Mappa Spaziale 7x7
-//                float[] spatialGrid = cnnExtractor.extractSpatialFeatures(bitmap);
+                // 2. L'OCCHIO
+                float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap);
 
-                // 2. Isoliamo SOLO la cella centrale [X:3, Y:3] -> Indice 24
+                // 3. IL CERVELLO (Solo la cella centrale [3,3])
                 int centerOffset = (3 * 7 + 3) * 1280;
-
                 double[] tempContinuous = new double[10000];
                 vsaBridge.projectSpatialCellToContinuous(spatialGrid, centerOffset, tempContinuous);
 
-                // 3. Binarizzazione
+                // 4. BINARIZZAZIONE E SALVATAGGIO
                 long[] newBscBlocks = new long[157];
                 for (int i = 0; i < 10000; i++) {
                     if (tempContinuous[i] > 0) {
@@ -596,8 +558,6 @@ public class MainActivity extends AppCompatActivity {
                         newBscBlocks[blockIndex] |= (1L << bitIndex);
                     }
                 }
-
-                // 4. Salvataggio
                 VsaVector newArchetype = new VsaVector(newBscBlocks);
                 archetypes.put(className, newArchetype);
                 saveUserArchetypeToStorage(className, newArchetype);
@@ -606,12 +566,11 @@ public class MainActivity extends AppCompatActivity {
                 Log.d(TAG, "Nuova classe '" + className + "' memorizzata in " + duration + " ms.");
 
                 runOnUiThread(() -> {
-                    Toast.makeText(MainActivity.this, "Appreso (Cella 3,3): " + className, Toast.LENGTH_SHORT).show();
-                    tvVerdict.setText(className.replace("_", " "));
+                    Toast.makeText(MainActivity.this, "Appreso: " + className.replace("_", " "), Toast.LENGTH_SHORT).show();
                 });
 
             } catch (Exception e) {
-                Log.e(TAG, "Errore nell'apprendimento spaziale", e);
+                Log.e(TAG, "Errore durante l'apprendimento", e);
             }
         });
     }
