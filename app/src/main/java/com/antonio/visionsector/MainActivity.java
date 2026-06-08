@@ -392,9 +392,9 @@ public class MainActivity extends AppCompatActivity {
                         String name = entry.getKey();
                         double similarity = reusableQueryVector.getCosineSimilarity(entry.getValue());
 
-                        if (similarity > 0.35) { // Se l'oggetto è in questa cella
-                            // Aggiorniamo la confidenza massima trovata
-// Aggiorniamo la confidenza massima trovata
+                        if (similarity > 0.25) { // Se l'oggetto è in questa cella
+
+                        // Aggiorniamo la confidenza massima trovata
                             double currentMax = maxSims.containsKey(name) ? maxSims.get(name) : 0.0;
                             maxSims.put(name, Math.max(currentMax, similarity));
 

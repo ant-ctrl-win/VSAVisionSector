@@ -102,6 +102,10 @@ public class TrackingOverlayView extends View {
 
         // MIRINO (Evidenzia l'area centrale 3x3)
         canvas.drawRect(offsetX + 2*cellW, offsetY + 2*cellH, offsetX + 5*cellW, offsetY + 5*cellH, viewfinderPaint);
+
+        // MIRINO (Evidenzia l'area centrale 5x5)
+//        canvas.drawRect(offsetX + 1*cellW, offsetY + 1*cellH, offsetX + 6*cellW, offsetY + 6*cellH, viewfinderPaint);
+
         // Puntino centrale esatto (cella 3,3)
         canvas.drawCircle(offsetX + 3.5f*cellW, offsetY + 3.5f*cellH, 8f, viewfinderPaint);
 
