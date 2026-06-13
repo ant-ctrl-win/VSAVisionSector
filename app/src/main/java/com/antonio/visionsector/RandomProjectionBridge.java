@@ -60,6 +60,60 @@ public class RandomProjectionBridge {
         return reuseVector;
     }
 
+    // Modifica in RandomProjectionBridge.java
+    public void projectBottleneckToContinuous(float[] bottleneckFeatures, double[] outContinuous) {
+        int activeCount = 0;
+        int[] activeIndices = new int[256];
+        float[] activeValues = new float[256];
+
+        for (int i = 0; i < 256; i++) {
+            if (bottleneckFeatures[i] != 0.0f) {
+                activeIndices[activeCount] = i;
+                activeValues[activeCount] = bottleneckFeatures[i];
+                activeCount++;
+            }
+        }
+
+        // Proiezione iperdimensionale a 10000
+        for (int j = 0; j < 10000; j++) {
+            boolean[] basis = projectionMatrix[j];
+            double sum = 0.0;
+            for (int k = 0; k < activeCount; k++) {
+                int idx = activeIndices[k];
+                if (basis[idx]) sum += activeValues[k];
+                else sum -= activeValues[k];
+            }
+            outContinuous[j] = sum;
+        }
+    }
+
+    // In RandomProjectionBridge.java
+    public void projectReducedCellToContinuous(float[] reducedCell, double[] outContinuous) {
+        int[] activeIndices = new int[256];
+        float[] activeValues = new float[256];
+        int activeCount = 0;
+
+        for (int i = 0; i < 256; i++) {
+            float val = reducedCell[i];
+            if (val > 0.0f) {
+                activeIndices[activeCount] = i;
+                activeValues[activeCount] = val;
+                activeCount++;
+            }
+        }
+
+        for (int j = 0; j < vsaDimensions; j++) {
+            boolean[] basis = projectionMatrix[j];
+            double sum = 0.0;
+            for (int k = 0; k < activeCount; k++) {
+                int idx = activeIndices[k];
+                if (basis[idx]) sum += activeValues[k];
+                else sum -= activeValues[k];
+            }
+            outContinuous[j] = sum;
+        }
+    }
+
     /**
      * Estrae e proietta una singola cella spaziale direttamente dall'array gigante della CNN.
      * Usa un offset per evitare di instanziare nuovi array float[] e affaticare il Garbage Collector.

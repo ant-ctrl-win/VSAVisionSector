@@ -36,6 +36,12 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    private RandomProjectionBridge vsaBridge;
+    private BottleneckBridge bottleneckBridge; // NUOVO
+
+    // Buffer ottimizzati
+    private float[] reducedBuffer256; // NUOVO
+    private double[] continuousBuffer;
     private TrackingOverlayView trackingOverlay;
     private VsaVector reusableQueryVector;
     private static final String TAG = "VSA_Pipeline";
@@ -44,12 +50,12 @@ public class MainActivity extends AppCompatActivity {
 
     // Motore VSA e Rete
     private AndroidTFLiteExtractor cnnExtractor;
-    private RandomProjectionBridge vsaBridge;
+
 //    private DatasetStatTracker statTracker;
     private Map<String, VsaVector> archetypes;
 
     // Buffer ottimizzati anti-Garbage Collector (Sub-800ms sul J3)
-    private double[] continuousBuffer;
+
     private double[] standardizedBuffer;
     private long[] bscBlocksBuffer;
 
@@ -114,12 +120,18 @@ public class MainActivity extends AppCompatActivity {
                 cnnExtractor = new AndroidTFLiteExtractor(this, "mobilenet_v2_spatial.tflite");
 //                cnnExtractor = new AndroidTFLiteExtractor(this, "mobilenet_vsa.tflite");
 
-                vsaBridge = new RandomProjectionBridge(1280, 42L);
+                // INIZIALIZZA IL BOTTLENECK CON LO STESSO SEED
+                bottleneckBridge = new BottleneckBridge(42L);
+
+                // NOTA: Usa 256 invece di 1280!
+                vsaBridge = new RandomProjectionBridge(256, 42L);
+//                vsaBridge = new RandomProjectionBridge(1280, 42L);
 
                 // 2. Inizializzazione Tabula Rasa (Catalogo Base Vuoto)
                 archetypes = new java.util.HashMap<>();
 
                 // 3. Buffer Ottimizzati
+                reducedBuffer256 = new float[256];
                 continuousBuffer = new double[10000];
                 standardizedBuffer = new double[10000]; // Mantenuto per sicurezza strutturale
                 bscBlocksBuffer = new long[157];
@@ -350,22 +362,25 @@ public class MainActivity extends AppCompatActivity {
         if (cnnExtractor == null || vsaBridge == null || archetypes == null || archetypes.isEmpty()) return;
 
         try {
-            // 1. IL QUADRATO PERFETTO DAL FOTOGRAMMA
             int minDim = Math.min(bitmap.getWidth(), bitmap.getHeight());
             int startX = (bitmap.getWidth() - minDim) / 2;
             int startY = (bitmap.getHeight() - minDim) / 2;
             Bitmap squareBitmap = Bitmap.createBitmap(bitmap, startX, startY, minDim, minDim);
 
-            // 2. L'OCCHIO
             long startCNN = System.currentTimeMillis();
             float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap);
             long timeCNN = System.currentTimeMillis() - startCNN;
 
-            // 3. IL CERVELLO (Solo la cella centrale [3,3])
             long startVSA = System.currentTimeMillis();
-            int offset = (3 * 7 + 3) * 1280;
-            vsaBridge.projectSpatialCellToContinuous(spatialGrid, offset, continuousBuffer);
+            int centerOffset = (3 * 7 + 3) * 1280;
 
+            // FASE A: Riduzione (1280 -> 256)
+            bottleneckBridge.reduceCell(spatialGrid, centerOffset, reducedBuffer256);
+
+            // FASE B: Proiezione VSA (256 -> 10000)
+            vsaBridge.projectReducedCellToContinuous(reducedBuffer256, continuousBuffer);
+
+            // Binarizzazione (nota: LA RIGA VECCHIA E' STATA CANCELLATA QUI)
             for (int i = 0; i < 157; i++) bscBlocksBuffer[i] = 0L;
             for (int i = 0; i < 10000; i++) {
                 if (continuousBuffer[i] > 0) {
@@ -376,9 +391,8 @@ public class MainActivity extends AppCompatActivity {
             }
             reusableQueryVector.setBlocks(bscBlocksBuffer);
 
-            // 4. RICONOSCIMENTO (Cerca il miglior match)
             String bestMatch = null;
-            double bestSim = 0.25; // Soglia di sicurezza
+            double bestSim = 0.40;
             for (Map.Entry<String, VsaVector> entry : archetypes.entrySet()) {
                 double sim = reusableQueryVector.getCosineSimilarity(entry.getValue());
                 if (sim > bestSim) {
@@ -390,21 +404,17 @@ public class MainActivity extends AppCompatActivity {
             long timeVSA = System.currentTimeMillis() - startVSA;
             long totalTime = timeCNN + timeVSA;
 
-            // 5. PREPARAZIONE PER L'OVERLAY (Il rettangolo verde 5x5)
             List<TrackingOverlayView.DetectedItem> itemsForOverlay = new ArrayList<>();
             if (bestMatch != null) {
-                // Usa le coordinate da 1 a 5 per riempire il tuo mirino giallo!
                 itemsForOverlay.add(new TrackingOverlayView.DetectedItem(
                         bestMatch.replace("_", " "), 1, 1, 5, 5, bestSim
                 ));
             }
 
-            // LE COPIE "FINAL" PER EVITARE L'ERRORE DI JAVA
             final String finalMatch = bestMatch;
             final long finalTime = totalTime;
             final List<TrackingOverlayView.DetectedItem> finalItems = itemsForOverlay;
 
-            // 6. AGGIORNAMENTO UI
             runOnUiThread(() -> {
                 if (finalMatch != null) {
                     tvVerdict.setText("Bersaglio: " + finalMatch.replace("_", " "));
@@ -535,21 +545,23 @@ public class MainActivity extends AppCompatActivity {
                 long startLearning = System.currentTimeMillis();
                 Bitmap bitmap = sampleImages.get(0);
 
-                // 1. IL QUADRATO PERFETTO DAL FOTOGRAMMA
                 int minDim = Math.min(bitmap.getWidth(), bitmap.getHeight());
                 int startX = (bitmap.getWidth() - minDim) / 2;
                 int startY = (bitmap.getHeight() - minDim) / 2;
                 Bitmap squareBitmap = Bitmap.createBitmap(bitmap, startX, startY, minDim, minDim);
 
-                // 2. L'OCCHIO
                 float[] spatialGrid = cnnExtractor.extractSpatialFeatures(squareBitmap);
 
-                // 3. IL CERVELLO (Solo la cella centrale [3,3])
                 int centerOffset = (3 * 7 + 3) * 1280;
-                double[] tempContinuous = new double[10000];
-                vsaBridge.projectSpatialCellToContinuous(spatialGrid, centerOffset, tempContinuous);
 
-                // 4. BINARIZZAZIONE E SALVATAGGIO
+                // --- MODIFICA BOTTLENECK INSERITA QUI ---
+                float[] tempReduced = new float[256];
+                bottleneckBridge.reduceCell(spatialGrid, centerOffset, tempReduced);
+
+                double[] tempContinuous = new double[10000];
+                vsaBridge.projectReducedCellToContinuous(tempReduced, tempContinuous);
+                // ----------------------------------------
+
                 long[] newBscBlocks = new long[157];
                 for (int i = 0; i < 10000; i++) {
                     if (tempContinuous[i] > 0) {

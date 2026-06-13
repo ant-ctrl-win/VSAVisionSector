@@ -11,7 +11,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.antonio.visionsector" // <-- ALLINEATO AL NAMESPACE
+        applicationId = "com.antonio.visionsector.mono" // <-- ALLINEATO AL NAMESPACE
         minSdk = 24
         targetSdk = 34 // <-- ABBASSATO A 34 (36 causerebbe errori)
         versionCode = 1
