@@ -12,9 +12,9 @@ public class AndroidTFLiteExtractor {
     private Interpreter tflite;
     private ByteBuffer imgData;
 
-    // NUOVO BUFFER SPAZIALE: 7 * 7 * 1280 = 62720 float
+    // Output spaziale: 7 * 7 * 256
     private static final int GRID_SIZE = 7;
-    private static final int FEATURE_DIM = 1280;
+    private static final int FEATURE_DIM = 256;
     private static final int TOTAL_FEATURES = GRID_SIZE * GRID_SIZE * FEATURE_DIM;
 
     // Buffer per ricevere i dati grezzi dalla CNN

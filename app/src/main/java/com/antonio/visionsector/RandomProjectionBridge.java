@@ -68,13 +68,11 @@ public class RandomProjectionBridge {
     // cnnFeatureSize
 
     public void projectSpatialCellToContinuous(float[] spatialGrid, int startOffset, double[] outContinuous) {
-        // 1. FASE DI FILTRAGGIO SPARSO (ReLU6 Optimization)
-        // Creiamo piccoli buffer locali temporanei per salvare solo le feature attive
-        int[] activeIndices = new int[1280];
-        float[] activeValues = new float[1280];
+        int[] activeIndices = new int[cnnFeatureSize];
+        float[] activeValues = new float[cnnFeatureSize];
         int activeCount = 0;
 
-        for (int i = 0; i < 1280; i++) {
+        for (int i = 0; i < cnnFeatureSize; i++) {
             float val = spatialGrid[startOffset + i];
             if (val != 0.0f) { // Consideriamo solo i filtri che hanno visto qualcosa
                 activeIndices[activeCount] = i;
@@ -103,12 +101,11 @@ public class RandomProjectionBridge {
 
 
     public void projectFeatureVector(float[] features, double[] outContinuous) {
-        // 1. FASE DI FILTRAGGIO SPARSO (Solo i valori utili)
-        int[] activeIndices = new int[1280];
-        float[] activeValues = new float[1280];
+        int[] activeIndices = new int[cnnFeatureSize];
+        float[] activeValues = new float[cnnFeatureSize];
         int activeCount = 0;
 
-        for (int i = 0; i < 1280; i++) {
+        for (int i = 0; i < cnnFeatureSize; i++) {
             float val = features[i];
             if (val != 0.0f) {
                 activeIndices[activeCount] = i;
@@ -127,6 +124,16 @@ public class RandomProjectionBridge {
                 else sum -= activeValues[k];
             }
             outContinuous[j] = sum;
+        }
+    }
+
+    /** Normalizza L2 un vettore continuo in-place */
+    public void normalizeL2(double[] vector) {
+        double sumSq = 0;
+        for (int i = 0; i < vsaDimensions; i++) sumSq += vector[i] * vector[i];
+        double norm = Math.sqrt(sumSq);
+        if (norm > 1e-9) {
+            for (int i = 0; i < vsaDimensions; i++) vector[i] /= norm;
         }
     }
 
