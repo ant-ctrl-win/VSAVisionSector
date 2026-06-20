@@ -56,6 +56,9 @@ dependencies {
     // Il nostro motore offline
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
+    // MediaPipe Object Detector (NMS, anchor decoding, resize automatici)
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.espresso.core)
     androidTestImplementation(libs.ext.junit)

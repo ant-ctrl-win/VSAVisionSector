@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.RectF;
@@ -18,6 +19,8 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.ImageCapture;
+import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
@@ -27,8 +30,10 @@ import androidx.core.content.ContextCompat;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.File;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +41,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    private DetectionStabilizer stabilizer = new DetectionStabilizer();
     private static final String TAG = "VSA_TwoStage";
     private static final int CAMERA_PERMISSION_CODE = 101;
     private static final String USER_ARCHETYPES_FILE = "archetype_map.bin";
@@ -60,9 +66,9 @@ public class MainActivity extends AppCompatActivity {
     private TextView tvConfidence;
     private FloatingActionButton fabLearn;
     private TrackingOverlayView trackingOverlay;
+    private ImageCapture imageCapture;
 
     private boolean isProcessingFrame = false;
-    private boolean captureNextFrameForLearning = false;
     private String pendingLearningName = "";
 
     @Override
@@ -176,6 +182,10 @@ public class MainActivity extends AppCompatActivity {
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(viewFinder.getSurfaceProvider());
 
+                imageCapture = new ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        .build();
+
                 ImageAnalysis analysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
@@ -188,13 +198,9 @@ public class MainActivity extends AppCompatActivity {
                     isProcessingFrame = true;
                     try {
                         Bitmap frame = imageProxy.toBitmap();
-                        int rotation = imageProxy.getImageInfo().getRotationDegrees();
 
-                        if (captureNextFrameForLearning) {
-                            captureNextFrameForLearning = false;
-                            runOnUiThread(() -> triggerOneShotLearningFlow(frame, rotation));
-                        } else if (!archetypesBSC.isEmpty()) {
-                            processCameraFrame(frame, rotation);
+                        if (!archetypesBSC.isEmpty()) {
+                            processCameraFrame(frame, imageProxy.getImageInfo().getRotationDegrees());
                         }
 
                     } catch (Exception e) {
@@ -207,7 +213,7 @@ public class MainActivity extends AppCompatActivity {
 
                 CameraSelector selector = CameraSelector.DEFAULT_BACK_CAMERA;
                 provider.unbindAll();
-                provider.bindToLifecycle(this, selector, preview, analysis);
+                provider.bindToLifecycle(this, selector, preview, imageCapture, analysis);
 
                 tvVerdict.setText("Inquadra un oggetto...");
                 tvConfidence.setText("Two-Stage Cascade attivo");
@@ -222,90 +228,93 @@ public class MainActivity extends AppCompatActivity {
         try {
             long t0 = System.currentTimeMillis();
 
-            RectF boxNorm = ssdExtractor.detectObject(frame);
-            if (boxNorm == null) {
-                runOnUiThread(() -> {
-                    tvVerdict.setText("Ricerca in corso...");
-                    trackingOverlay.updateDetections(Collections.emptyList(), 1, 1);
-                });
-                return;
-            }
-
-            Log.d(TAG, "SSD box norm=[" + String.format("%.2f", boxNorm.left) + "," +
-                    String.format("%.2f", boxNorm.top) + " " + String.format("%.2f", boxNorm.right) +
-                    "x" + String.format("%.2f", boxNorm.bottom) + "] rot=" + rotationDegrees);
-
             int origW = frame.getWidth();
             int origH = frame.getHeight();
-            RectF boxPx = new RectF(
-                    boxNorm.left * origW,
-                    boxNorm.top * origH,
-                    boxNorm.right * origW,
-                    boxNorm.bottom * origH
-            );
 
-            if (boxPx.width() < 20 || boxPx.height() < 20) return;
-
-            Bitmap square = letterboxCrop(frame, boxPx);
-            if (square == null) return;
-
-            long tCNN = System.currentTimeMillis();
-            float[] features = encoder.extract(square);
-            square.recycle();
-            long timeCNN = System.currentTimeMillis() - tCNN;
-
-            applyDebinding(features, boxPx);
-
-            long tVSA = System.currentTimeMillis();
-            vsaBridge.projectFeatureVector(features, continuousBuffer);
-            binarizeToBlocks(continuousBuffer, bscBlocksBuffer);
-            reusableQueryVector.setBlocks(bscBlocksBuffer);
-
+            RectF boxNorm = ssdExtractor.detectObject(frame);
             String bestMatch = null;
             double bestSim = 0.35;
-            StringBuilder diag = new StringBuilder("VSA sim: ");
+            long timeCNN = 0;
+            long timeVSA = 0;
 
-            for (Map.Entry<String, VsaVector> entry : archetypesBSC.entrySet()) {
-                double sim = reusableQueryVector.getCosineSimilarity(entry.getValue());
-                diag.append(entry.getKey()).append("=").append(String.format("%.3f", sim)).append(" ");
-                if (sim > bestSim) {
-                    bestSim = sim;
-                    bestMatch = entry.getKey();
+            if (boxNorm != null && isBoxSane(boxNorm)) {
+                Log.d(TAG, "SSD box norm=[" + String.format("%.2f", boxNorm.left) + "," +
+                        String.format("%.2f", boxNorm.top) + " " + String.format("%.2f", boxNorm.right) +
+                        "x" + String.format("%.2f", boxNorm.bottom) + "] rot=" + rotationDegrees);
+
+                RectF cropBoxNorm = expandBox(boxNorm, 0.20f);
+                RectF boxPx = new RectF(
+                        cropBoxNorm.left * origW,
+                        cropBoxNorm.top * origH,
+                        cropBoxNorm.right * origW,
+                        cropBoxNorm.bottom * origH
+                );
+
+                if (boxPx.width() >= 20 && boxPx.height() >= 20) {
+                    Bitmap square = letterboxCrop(frame, boxPx);
+                    if (square != null) {
+                        long tCNN = System.currentTimeMillis();
+                        float[] features = encoder.extract(square);
+                        square.recycle();
+                        timeCNN = System.currentTimeMillis() - tCNN;
+
+                        applyDebinding(features, boxPx);
+
+                        long tVSA = System.currentTimeMillis();
+                        vsaBridge.projectFeatureVector(features, continuousBuffer);
+                        binarizeToBlocks(continuousBuffer, bscBlocksBuffer);
+                        reusableQueryVector.setBlocks(bscBlocksBuffer);
+
+                        StringBuilder diag = new StringBuilder("VSA sim: ");
+                        for (Map.Entry<String, VsaVector> entry : archetypesBSC.entrySet()) {
+                            double sim = reusableQueryVector.getCosineSimilarity(entry.getValue());
+                            diag.append(entry.getKey()).append("=").append(String.format("%.3f", sim)).append(" ");
+                            if (sim > bestSim) {
+                                bestSim = sim;
+                                bestMatch = entry.getKey();
+                            }
+                        }
+                        Log.d(TAG, diag.toString());
+                        timeVSA = System.currentTimeMillis() - tVSA;
+
+                        Log.d(TAG, "Box=[" + (int)boxPx.left + "," + (int)boxPx.top + " " + (int)boxPx.width() + "x" + (int)boxPx.height() + "] match=" + bestMatch + " sim=" + String.format("%.3f", bestSim));
+                    }
                 }
             }
-            Log.d(TAG, diag.toString());
 
-            long timeVSA = System.currentTimeMillis() - tVSA;
             long total = System.currentTimeMillis() - t0;
 
-            String verdict = (bestMatch != null)
-                    ? bestMatch.replace("_", " ") + " (" + String.format("%.2f", bestSim) + ")"
-                    : "Nessun target";
-            String conf = "SSD+" + timeCNN + "ms VSA:" + timeVSA + "ms TOT:" + total + "ms";
-            Log.d(TAG, "Box=[" + (int)boxPx.left + "," + (int)boxPx.top + " " + (int)boxPx.width() + "x" + (int)boxPx.height() + "] match=" + bestMatch + " sim=" + String.format("%.3f", bestSim));
+            DetectionStabilizer.StabilizedResult result = stabilizer.update(boxNorm, bestMatch);
 
-            final String fVerdict = verdict;
-            final String fConf = conf;
-            final int fRot = rotationDegrees;
-            final String fMatch = bestMatch;
-            final double fSim = bestSim;
+            final String fVerdict;
+            final String fConf = "SSD+" + timeCNN + "ms VSA:" + timeVSA + "ms TOT:" + total + "ms";
+            final List<TrackingOverlayView.DetectedItem> fItems;
+            final int fDispW = (rotationDegrees == 90 || rotationDegrees == 270) ? origH : origW;
+            final int fDispH = (rotationDegrees == 90 || rotationDegrees == 270) ? origW : origH;
+
+            if (result.isVisible && result.box != null && result.className != null) {
+                fVerdict = result.className.replace("_", " ") + " (" + String.format("%.2f", bestSim) + ")";
+
+                RectF boxPx = new RectF(
+                        result.box.left * origW,
+                        result.box.top * origH,
+                        result.box.right * origW,
+                        result.box.bottom * origH
+                );
+                RectF rotBox = rotateBoxForDisplay(boxPx, origW, origH, rotationDegrees);
+                fItems = Collections.singletonList(new TrackingOverlayView.DetectedItem(
+                        result.className.replace("_", " "),
+                        (int) rotBox.left, (int) rotBox.top,
+                        (int) rotBox.right, (int) rotBox.bottom, bestSim));
+            } else {
+                fVerdict = "Ricerca in corso...";
+                fItems = Collections.emptyList();
+            }
 
             runOnUiThread(() -> {
                 tvVerdict.setText(fVerdict);
                 tvConfidence.setText(fConf);
-                if (fMatch != null) {
-                    RectF rotBox = rotateBoxForDisplay(boxPx, origW, origH, fRot);
-                    int dispW = (fRot == 90 || fRot == 270) ? origH : origW;
-                    int dispH = (fRot == 90 || fRot == 270) ? origW : origH;
-                    trackingOverlay.updateDetections(
-                            Collections.singletonList(new TrackingOverlayView.DetectedItem(
-                                    fMatch.replace("_", " "),
-                                    (int) rotBox.left, (int) rotBox.top,
-                                    (int) rotBox.right, (int) rotBox.bottom, fSim)),
-                            dispW, dispH);
-                } else {
-                    trackingOverlay.updateDetections(Collections.emptyList(), origW, origH);
-                }
+                trackingOverlay.updateDetections(fItems, fDispW, fDispH);
             });
 
             frame.recycle();
@@ -326,6 +335,24 @@ public class MainActivity extends AppCompatActivity {
             default:
                 return new RectF(box);
         }
+    }
+
+    private RectF expandBox(RectF box, float ratio) {
+        float w = box.width() * ratio;
+        float h = box.height() * ratio;
+        return new RectF(
+                Math.max(0f, box.left - w),
+                Math.max(0f, box.top - h),
+                Math.min(1f, box.right + w),
+                Math.min(1f, box.bottom + h)
+        );
+    }
+
+    private boolean isBoxSane(RectF box) {
+        if (box == null) return false;
+        float area = box.width() * box.height();
+        if (area < 0) area = -area;
+        return area >= 0.01f && area <= 0.80f;
     }
 
     private Bitmap letterboxCrop(Bitmap source, RectF box) {
@@ -405,8 +432,9 @@ public class MainActivity extends AppCompatActivity {
         builder.setPositiveButton("Cattura e Impara", (dialog, which) -> {
             String name = input.getText().toString().trim();
             if (!name.isEmpty()) {
+                Log.d(TAG, ">>> Pulsante + premuto, nome=" + name + ", scatto foto...");
                 pendingLearningName = name;
-                captureNextFrameForLearning = true;
+                capturePhotoForLearning();
             } else {
                 Toast.makeText(MainActivity.this, "Il nome non puo essere vuoto", Toast.LENGTH_SHORT).show();
             }
@@ -415,40 +443,84 @@ public class MainActivity extends AppCompatActivity {
         builder.show();
     }
 
-    private void triggerOneShotLearningFlow(Bitmap sample, int rotationDegrees) {
-        tvVerdict.setText("Apprendimento in corso...");
+    private void capturePhotoForLearning() {
+        tvVerdict.setText("Scatto foto...");
         tvConfidence.setText("Two-Stage Learning...");
-        learnNewCustomObject(pendingLearningName, sample, rotationDegrees);
+
+        File photoFile = new File(getCacheDir(), "learning_photo.jpg");
+        ImageCapture.OutputFileOptions outputOptions =
+                new ImageCapture.OutputFileOptions.Builder(photoFile).build();
+
+        imageCapture.takePicture(outputOptions, inferenceExecutor,
+                new ImageCapture.OnImageSavedCallback() {
+                    @Override
+                    public void onImageSaved(@NonNull ImageCapture.OutputFileResults output) {
+                        Bitmap photo = BitmapFactory.decodeFile(photoFile.getAbsolutePath());
+                        if (photo == null) {
+                            Log.e(TAG, "Errore decodifica foto da file");
+                            runOnUiThread(() -> {
+                                tvVerdict.setText("Errore foto — riprova");
+                                Toast.makeText(MainActivity.this, "Errore decodifica foto", Toast.LENGTH_SHORT).show();
+                            });
+                            return;
+                        }
+                        Log.d(TAG, ">>> Foto catturata: " + photo.getWidth() + "x" + photo.getHeight());
+                        learnNewCustomObject(pendingLearningName, photo, 0);
+                    }
+
+                    @Override
+                    public void onError(@NonNull ImageCaptureException exception) {
+                        Log.e(TAG, "Errore cattura foto", exception);
+                        runOnUiThread(() -> {
+                            tvVerdict.setText("Errore foto — riprova");
+                            Toast.makeText(MainActivity.this, "Errore scatto foto", Toast.LENGTH_SHORT).show();
+                        });
+                    }
+                });
     }
 
     private void learnNewCustomObject(String className, Bitmap sampleFrame, int rotationDegrees) {
         inferenceExecutor.execute(() -> {
+            Log.d(TAG, ">>> learnNewCustomObject iniziato su executor, nome=" + className +
+                    " bitmap=" + sampleFrame.getWidth() + "x" + sampleFrame.getHeight() +
+                    (sampleFrame.isRecycled() ? " RECYCLED!" : ""));
             try {
                 long start = System.currentTimeMillis();
 
                 RectF boxNorm = ssdExtractor.detectObject(sampleFrame);
+                Log.d(TAG, ">>> SSD detectObject completato, boxNorm=" + boxNorm);
                 if (boxNorm == null) {
-                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                            "Nessun oggetto rilevato. Inquadra meglio.", Toast.LENGTH_SHORT).show());
+                    runOnUiThread(() -> {
+                        tvVerdict.setText("Nessun oggetto — inquadra meglio");
+                        Toast.makeText(MainActivity.this,
+                                "Nessun oggetto rilevato. Inquadra meglio.", Toast.LENGTH_SHORT).show();
+                    });
                     return;
                 }
 
                 int origW = sampleFrame.getWidth();
                 int origH = sampleFrame.getHeight();
+                RectF cropBoxNorm = expandBox(boxNorm, 0.20f);
                 RectF boxPx = new RectF(
-                        boxNorm.left * origW,
-                        boxNorm.top * origH,
-                        boxNorm.right * origW,
-                        boxNorm.bottom * origH
+                        cropBoxNorm.left * origW,
+                        cropBoxNorm.top * origH,
+                        cropBoxNorm.right * origW,
+                        cropBoxNorm.bottom * origH
                 );
                 if (boxPx.width() < 20 || boxPx.height() < 20) {
-                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                            "Oggetto troppo piccolo.", Toast.LENGTH_SHORT).show());
+                    runOnUiThread(() -> {
+                        tvVerdict.setText("Oggetto troppo piccolo");
+                        Toast.makeText(MainActivity.this,
+                                "Oggetto troppo piccolo.", Toast.LENGTH_SHORT).show();
+                    });
                     return;
                 }
 
                 Bitmap square = letterboxCrop(sampleFrame, boxPx);
-                if (square == null) return;
+                if (square == null) {
+                    runOnUiThread(() -> tvVerdict.setText("Errore ritaglio — riprova"));
+                    return;
+                }
 
                 float[] features = encoder.extract(square);
                 square.recycle();

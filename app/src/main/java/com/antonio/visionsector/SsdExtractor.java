@@ -3,111 +3,93 @@ package com.antonio.visionsector;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.RectF;
+import android.util.Log;
 
-import org.tensorflow.lite.Interpreter;
+import com.google.mediapipe.framework.image.BitmapImageBuilder;
+import com.google.mediapipe.framework.image.MPImage;
+import com.google.mediapipe.tasks.components.containers.Detection;
+import com.google.mediapipe.tasks.core.BaseOptions;
+import com.google.mediapipe.tasks.vision.core.RunningMode;
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector;
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectionResult;
 
-import java.io.FileInputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.List;
 
 /**
- * Wrapper per MobileNet SSD TFLite — solo localizzazione (ignora le classi).
- * Input:  uint8 [0-255], 300x300x3
- * Output: RectF normalizzato [0.0-1.0] sul frame originale, o null se nessuna detection.
+ * SSD object detector using MediaPipe Tasks Vision.
+ *
+ * Model: MobileNetV2-SSD (Class-Agnostic), trained with MediaPipe Model Maker.
+ * Input:  float32[1, 256, 256, 3]
+ * Output: boxes  float32[1, 12276, 4]   (raw anchor offsets)
+ *         scores float32[1, 12276, 2]   (index 1 = object confidence)
+ *
+ * All anchor decoding, NMS, and resize are handled internally by ObjectDetector.
  */
 public class SsdExtractor {
 
-    private static final int INPUT_SIZE = 300;
-    private static final float CONFIDENCE_THRESHOLD = 0.5f;
+    private static final String TAG = "SsdExtractor";
+    private static final float SCORE_THRESHOLD = 0.3f;
 
-    private final Interpreter tflite;
-    private ByteBuffer inputBuffer;
+    private final ObjectDetector detector;
 
-    private float[][][] detectionBoxes;
-    private float[][] detectionClasses;
-    private float[][] detectionScores;
-    private float[] numDetections;
-
+    /**
+     * Creates the extractor loading the model from app assets.
+     *
+     * @param context   application context
+     * @param modelPath asset path, e.g. "mobilenet_ssd.tflite"
+     */
     public SsdExtractor(Context context, String modelPath) throws Exception {
-        Interpreter.Options options = new Interpreter.Options();
-        options.setNumThreads(2);
-        tflite = new Interpreter(loadModelFile(context, modelPath), options);
+        BaseOptions baseOptions = BaseOptions.builder()
+                .setModelAssetPath(modelPath)
+                .build();
 
-        inputBuffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * 3);
-        inputBuffer.order(ByteOrder.nativeOrder());
+        ObjectDetector.ObjectDetectorOptions options =
+                ObjectDetector.ObjectDetectorOptions.builder()
+                        .setBaseOptions(baseOptions)
+                        .setMaxResults(1)
+                        .setScoreThreshold(SCORE_THRESHOLD)
+                        .setRunningMode(RunningMode.IMAGE)
+                        .build();
 
-        int[] shape0 = tflite.getOutputTensor(0).shape();
-        int maxDet = shape0[1];
-
-        detectionBoxes = new float[1][maxDet][4];
-        detectionClasses = new float[1][maxDet];
-        detectionScores = new float[1][maxDet];
-        numDetections = new float[1];
-    }
-
-    private MappedByteBuffer loadModelFile(Context context, String modelPath) throws Exception {
-        android.content.res.AssetFileDescriptor fd = context.getAssets().openFd(modelPath);
-        FileInputStream is = new FileInputStream(fd.getFileDescriptor());
-        FileChannel ch = is.getChannel();
-        return ch.map(FileChannel.MapMode.READ_ONLY, fd.getStartOffset(), fd.getDeclaredLength());
+        detector = ObjectDetector.createFromOptions(context, options);
+        Log.d(TAG, "ObjectDetector ready — model: " + modelPath);
     }
 
     /**
-     * Rileva l'oggetto con la confidenza piu alta nel frame.
-     * @return RectF normalizzato [0.0-1.0] sulle dimensioni originali, o null.
+     * Runs detection on a bitmap frame.
+     *
+     * @param bitmap input frame at any resolution
+     * @return bounding box normalized to [0.0, 1.0] relative to bitmap dimensions,
+     *         or null if no object exceeds the confidence threshold
      */
     public RectF detectObject(Bitmap bitmap) {
-        Bitmap resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true);
-        convertBitmapToByteBuffer(resized);
-        resized.recycle();
+        int imgW = bitmap.getWidth();
+        int imgH = bitmap.getHeight();
 
-        Map<Integer, Object> outputs = new HashMap<>();
-        outputs.put(0, detectionBoxes);
-        outputs.put(1, detectionClasses);
-        outputs.put(2, detectionScores);
-        outputs.put(3, numDetections);
-        tflite.runForMultipleInputsOutputs(new Object[]{inputBuffer}, outputs);
+        MPImage mpImage = new BitmapImageBuilder(bitmap).build();
+        ObjectDetectionResult result = detector.detect(mpImage);
+        List<Detection> detections = result.detections();
 
-        int bestIdx = -1;
-        float bestScore = CONFIDENCE_THRESHOLD;
-        int num = Math.min((int) numDetections[0], detectionScores[0].length);
-
-        for (int i = 0; i < num; i++) {
-            if (detectionScores[0][i] > bestScore) {
-                bestScore = detectionScores[0][i];
-                bestIdx = i;
-            }
+        if (detections == null || detections.isEmpty()) {
+            return null;
         }
 
-        if (bestIdx < 0) return null;
+        RectF bbox = detections.get(0).boundingBox();
 
-        float ymin = detectionBoxes[0][bestIdx][0];
-        float xmin = detectionBoxes[0][bestIdx][1];
-        float ymax = detectionBoxes[0][bestIdx][2];
-        float xmax = detectionBoxes[0][bestIdx][3];
-
-        return new RectF(xmin, ymin, xmax, ymax);
+        return new RectF(
+                bbox.left   / imgW,
+                bbox.top    / imgH,
+                bbox.right  / imgW,
+                bbox.bottom / imgH
+        );
     }
 
-    private void convertBitmapToByteBuffer(Bitmap bitmap) {
-        inputBuffer.rewind();
-        int[] pixels = new int[INPUT_SIZE * INPUT_SIZE];
-        bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE);
-
-        for (int pixel : pixels) {
-            inputBuffer.put((byte) ((pixel >> 16) & 0xFF));
-            inputBuffer.put((byte) ((pixel >> 8) & 0xFF));
-            inputBuffer.put((byte) (pixel & 0xFF));
-        }
-    }
-
+    /** Releases native resources. */
     public void close() {
-        if (tflite != null) {
-            tflite.close();
+        try {
+            detector.close();
+        } catch (Exception e) {
+            Log.e(TAG, "Error closing detector", e);
         }
     }
 }
