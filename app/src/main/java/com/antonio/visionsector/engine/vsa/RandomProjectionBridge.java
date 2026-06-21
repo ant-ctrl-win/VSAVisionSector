@@ -1,4 +1,4 @@
-package com.antonio.visionsector;
+package com.antonio.visionsector.engine.vsa;
 
 import java.util.Random;
 

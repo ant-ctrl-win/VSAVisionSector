@@ -1,4 +1,4 @@
-package com.antonio.visionsector;
+package com.antonio.visionsector.engine.vsa;
 
 /**
  * Rappresenta un Ipervettore Bipolare (MAP-B) compresso in un array di bit (long).

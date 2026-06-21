@@ -58,10 +58,20 @@
             android:textColor="#A0A0AB"
             android:gravity="center"
             android:textStyle="italic"/>
+
+        <ProgressBar
+            android:id="@+id/progressLearning"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="6dp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone"
+            android:progressTint="#2E7D32"
+            android:progressBackgroundTint="#3A3A44" />
     </LinearLayout>
     </androidx.cardview.widget.CardView>
 
-    <com.antonio.visionsector.TrackingOverlayView
+    <com.antonio.visionsector.ui.TrackingOverlayView
         android:id="@+id/trackingOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />

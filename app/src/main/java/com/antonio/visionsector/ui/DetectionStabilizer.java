@@ -1,4 +1,4 @@
-package com.antonio.visionsector;
+package com.antonio.visionsector.ui;
 
 import android.graphics.RectF;
 import java.util.HashMap;

@@ -1,4 +1,4 @@
-package com.antonio.visionsector;
+package com.antonio.visionsector.utils;
 
 /**
  * Filtro ultra-veloce tramite Lookup Table (LUT)

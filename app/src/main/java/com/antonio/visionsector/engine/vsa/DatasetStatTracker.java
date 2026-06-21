@@ -1,4 +1,4 @@
-package com.antonio.visionsector;
+package com.antonio.visionsector.engine.vsa;
 
 import android.content.Context;
 import java.io.DataInputStream;
