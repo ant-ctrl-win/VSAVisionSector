@@ -74,4 +74,16 @@ public class VsaVector {
             System.arraycopy(newBlocks, 0, this.blocks, 0, 157);
         }
     }
+
+    public double getBitOnePercentage() {
+        return bitOnePercentage(blocks);
+    }
+
+    public static double bitOnePercentage(long[] blocks) {
+        int totalOnes = 0;
+        for (int i = 0; i < ARRAY_SIZE; i++) {
+            totalOnes += Long.bitCount(blocks[i]);
+        }
+        return (100.0 * totalOnes) / DIMENSIONS;
+    }
 }

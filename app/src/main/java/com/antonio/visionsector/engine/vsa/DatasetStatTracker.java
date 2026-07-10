@@ -23,6 +23,12 @@ public class DatasetStatTracker {
         return standardized;
     }
 
+    public void standardizeInPlace(double[] vector) {
+        for (int i = 0; i < dimensions; i++) {
+            vector[i] = (vector[i] - mean[i]) / stdDev[i];
+        }
+    }
+
     public int getDimensions() {
         return dimensions;
     }

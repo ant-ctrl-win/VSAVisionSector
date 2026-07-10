@@ -4,7 +4,13 @@ import com.antonio.visionsector.detector.SsdExtractor;
 import com.antonio.visionsector.encoder.FeatureEncoder;
 import com.antonio.visionsector.engine.vsa.RandomProjectionBridge;
 import com.antonio.visionsector.engine.vsa.VsaVector;
+import com.antonio.visionsector.engine.vsa.DatasetStatTracker;
 import com.antonio.visionsector.engine.learning.LearningSessionManager;
+
+
+import com.antonio.visionsector.network.RetrofitClient;
+import com.antonio.visionsector.network.dto.ModuleBundleDTO;
+
 
 import android.Manifest;
 import android.content.Context;
@@ -19,6 +25,12 @@ import android.widget.EditText;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import retrofit2.Retrofit;
+import retrofit2.converter.gson.GsonConverterFactory;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
@@ -35,6 +47,7 @@ import com.antonio.visionsector.R;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -45,11 +58,16 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String TAG = "VSA_TwoStage";
+    // Tag per identificare facilmente i nostri log nella console di Android Studio
+    private static final String TAG = "VSHUB_NETWORK_TEST";
+//    private static final String TAG = "VSA_TwoStage";
     private static final int CAMERA_PERMISSION_CODE = 101;
     private static final String USER_ARCHETYPES_FILE = "archetype_map.bin";
-    private static final int FEATURE_DIM = 1280;
     private static final int VSA_DIM = 10000;
+    private static final int FILE_MAGIC = 0x56534132;
+    private static final int DEFAULT_SAMPLE_COUNT = 8;
+
+    private int featureDim;
 
     private LearningSessionManager learningSessionManager;
     private DetectionStabilizer stabilizer = new DetectionStabilizer();
@@ -60,10 +78,14 @@ public class MainActivity extends AppCompatActivity {
 
     private Map<String, double[]> archetypesMAP;
     private Map<String, VsaVector> archetypesBSC;
+    private Map<String, Integer> sampleCounts;
 
     private double[] continuousBuffer;
     private long[] bscBlocksBuffer;
     private VsaVector reusableQueryVector;
+
+    private DatasetStatTracker statsTracker;
+    private int frameCounter;
 
     private final ExecutorService inferenceExecutor = Executors.newSingleThreadExecutor();
     private PreviewView viewFinder;
@@ -80,6 +102,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        testCloudConnection();
 
         learningSessionManager = new LearningSessionManager(VSA_DIM, 8);
 
@@ -134,20 +158,31 @@ public class MainActivity extends AppCompatActivity {
 
                 ssdExtractor = new SsdExtractor(this, "mobilenet_ssd.tflite");
                 encoder = new FeatureEncoder(this, "mobilenet_vsa.tflite");
+                featureDim = encoder.getFeatureDimension();
 
                 gpuConfigLabel = "SSD:" + (ssdExtractor.isUsingGpu() ? "GPU" : "CPU")
                         + " Enc:" + (encoder.isUsingGpu() ? "GPU" : "CPU");
                 Log.i(TAG, "Configurazione delegate: " + gpuConfigLabel);
+                Log.i(TAG, "Feature dimension dal modello: " + featureDim);
 
                 Bitmap black = Bitmap.createBitmap(224, 224, Bitmap.Config.ARGB_8888);
                 new Canvas(black).drawColor(Color.BLACK);
                 blackPaddingSignature = encoder.extract(black);
                 black.recycle();
 
-                vsaBridge = new RandomProjectionBridge(FEATURE_DIM, 42L);
+                vsaBridge = new RandomProjectionBridge(featureDim, 42L);
+
+                try {
+                    statsTracker = DatasetStatTracker.importFromAndroidAssets(this, "vsa_stats.bin");
+                    Log.i(TAG, "Statistiche Z‑Score caricate: " + statsTracker.getDimensions() + " dimensioni");
+                } catch (Exception e) {
+                    statsTracker = null;
+                    Log.w(TAG, "vsa_stats.bin non trovato o illeggibile — Z‑Score disabilitato: " + e.getMessage());
+                }
 
                 archetypesMAP = new HashMap<>();
                 archetypesBSC = new HashMap<>();
+                sampleCounts = new HashMap<>();
 
                 continuousBuffer = new double[VSA_DIM];
                 bscBlocksBuffer = new long[157];
@@ -156,9 +191,10 @@ public class MainActivity extends AppCompatActivity {
                 java.io.File oldFile = new java.io.File(getFilesDir(), USER_ARCHETYPES_FILE);
                 if (oldFile.exists()) {
                     oldFile.delete();
-                    Log.d(TAG, "Archetipi precedenti cancellati — test pulito");
+                    Log.d(TAG, "Archetipi precedenti cancellati — partenza pulita");
                 }
 
+                loadBuiltInArchetypes();
                 loadAllArchetypesMAP();
                 if (!archetypesMAP.isEmpty()) {
                     for (Map.Entry<String, double[]> e : archetypesMAP.entrySet()) {
@@ -185,9 +221,7 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // Permessi e Camera
-    // ═══════════════════════════════════════════════════════════════════
+
 
     private void checkCameraPermissionAndStart() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -252,10 +286,6 @@ public class MainActivity extends AppCompatActivity {
         }, ContextCompat.getMainExecutor(this));
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // Pipeline Two‑Stage (inferenza e apprendimento)
-    // ═══════════════════════════════════════════════════════════════════
-
     private void processCameraFrame(Bitmap frame, int rotationDegrees) {
         try {
             long t0 = System.currentTimeMillis();
@@ -263,13 +293,14 @@ public class MainActivity extends AppCompatActivity {
             int origH = frame.getHeight();
 
             RectF boxNorm = ssdExtractor.detectObject(frame);
+            double bestSim = 0;
             String bestMatch = null;
-            double bestSim = 0.35;
+            DetectionStabilizer.PredictionVerdict predVerdict = DetectionStabilizer.PredictionVerdict.unknown(0.0);
             long timeCNN = 0;
             long timeVSA = 0;
 
             if (boxNorm != null && isBoxSane(boxNorm)) {
-                RectF cropBoxNorm = expandBox(boxNorm, 0.20f);
+                RectF cropBoxNorm = expandBox(boxNorm, 0.03f);
 
                 RectF boxPx = new RectF(
                         cropBoxNorm.left * origW,
@@ -289,12 +320,14 @@ public class MainActivity extends AppCompatActivity {
                         applyDebinding(features, boxPx);
 
                         long tVSA = System.currentTimeMillis();
-                        vsaBridge.projectFeatureVector(features, continuousBuffer);
 
-                        // ── BIVIO: APPRENDIMENTO vs INFERENZA ──────────
                         if (learningSessionManager.getCurrentState() == LearningSessionManager.State.COLLECTING) {
 
+                            vsaBridge.projectFeatureVector(features, continuousBuffer);
                             vsaBridge.normalizeL2(continuousBuffer);
+                            if (statsTracker != null) {
+                                statsTracker.standardizeInPlace(continuousBuffer);
+                            }
 
                             boolean isDone = learningSessionManager.addFrame(continuousBuffer);
                             int collected = learningSessionManager.getFramesCollected();
@@ -313,26 +346,50 @@ public class MainActivity extends AppCompatActivity {
                             });
 
                             if (isDone) {
+                                int nFrames = learningSessionManager.getFramesCollected();
                                 double[] finalBundle = learningSessionManager.getFinalBundleAndReset();
-                                saveBundleAsArchetype(pName, finalBundle);
+                                saveBundleAsArchetype(pName, finalBundle, nFrames);
                             }
 
                             frame.recycle();
                             return;
 
                         } else {
-                            // ── INFERENZA STANDARD ─────────────────────
                             if (!archetypesBSC.isEmpty()) {
+                                vsaBridge.projectFeatureVector(features, continuousBuffer);
+                                vsaBridge.normalizeL2(continuousBuffer);
+                                if (statsTracker != null) {
+                                    statsTracker.standardizeInPlace(continuousBuffer);
+                                }
                                 binarizeToBlocks(continuousBuffer, bscBlocksBuffer);
                                 reusableQueryVector.setBlocks(bscBlocksBuffer);
 
+                                if (++frameCounter % 100 == 0) {
+                                    double pct = VsaVector.bitOnePercentage(bscBlocksBuffer);
+                                    Log.i(TAG, "Bit‑1 query frame#" + frameCounter + ": " + String.format("%.1f%%", pct));
+                                }
+
+                                List<DetectionStabilizer.SimilarityResult> simResults = new ArrayList<>();
                                 for (Map.Entry<String, VsaVector> entry : archetypesBSC.entrySet()) {
                                     double sim = reusableQueryVector.getCosineSimilarity(entry.getValue());
-                                    if (sim > bestSim) {
-                                        bestSim = sim;
-                                        bestMatch = entry.getKey();
-                                    }
+                                    simResults.add(new DetectionStabilizer.SimilarityResult(entry.getKey(), sim));
                                 }
+                                simResults.sort((a, b) -> Double.compare(b.similarity, a.similarity));
+
+                                if (simResults.size() >= 2) {
+                                    Log.d("VSA_DIAGNOSTIC",
+                                            "Top1=" + simResults.get(0).className + "(" + String.format("%.4f", simResults.get(0).similarity) + ")"
+                                                    + " Top2=" + simResults.get(1).className + "(" + String.format("%.4f", simResults.get(1).similarity) + ")"
+                                                    + " Delta=" + String.format("%.4f", simResults.get(0).similarity - simResults.get(1).similarity));
+                                } else if (simResults.size() == 1) {
+                                    Log.d("VSA_DIAGNOSTIC",
+                                            "Top1=" + simResults.get(0).className + "(" + String.format("%.4f", simResults.get(0).similarity) + ")"
+                                                    + " Top2=N/A Delta=N/A");
+                                }
+
+                                predVerdict = DetectionStabilizer.evaluatePrediction(simResults, archetypesBSC.size());
+                                bestSim = simResults.isEmpty() ? 0 : simResults.get(0).similarity;
+                                bestMatch = predVerdict.className;
                                 timeVSA = System.currentTimeMillis() - tVSA;
                             }
                         }
@@ -344,23 +401,36 @@ public class MainActivity extends AppCompatActivity {
 
             long total = System.currentTimeMillis() - t0;
 
-            // ── STABILIZZAZIONE E UI (solo se non in collecting) ───────
             if (learningSessionManager.getCurrentState() != LearningSessionManager.State.COLLECTING) {
-                DetectionStabilizer.StabilizedResult result = stabilizer.update(boxNorm, bestMatch);
+                DetectionStabilizer.StabilizedResult result = stabilizer.update(boxNorm, predVerdict.verdict, bestMatch);
 
                 final String fVerdict;
                 final String fConf;
                 final List<TrackingOverlayView.DetectedItem> fItems;
 
-                // 0. Calcoliamo le dimensioni del frame ROTATO (Ecco le variabili che mancavano!)
                 final int rotatedFrameW = (rotationDegrees == 90 || rotationDegrees == 270) ? origH : origW;
                 final int rotatedFrameH = (rotationDegrees == 90 || rotationDegrees == 270) ? origW : origH;
 
-                if (result.isVisible && result.box != null && result.className != null) {
-                    fVerdict = result.className.replace("_", " ") + " (" + String.format("%.2f", bestSim) + ")";
+                if (result.isVisible && result.box != null) {
+                    switch (result.verdict) {
+                        case UNKNOWN:
+                            fVerdict = "Sconosciuto";
+                            break;
+                        case AMBIGUOUS:
+                            fVerdict = "Avvicinati / Ruota oggetto";
+                            break;
+                        case MATCH_FOUND:
+                        default:
+                            if (result.className != null) {
+                                double confidence = Math.min(100.0, (predVerdict.zScore / 3.0) * 100.0);
+                                fVerdict = result.className.replace("_", " ") + " (" + String.format("%.0f%%", confidence) + ")";
+                            } else {
+                                fVerdict = "Ricerca in corso...";
+                            }
+                            break;
+                    }
                     fConf = gpuConfigLabel + " | SSD+" + timeCNN + "ms VSA:" + timeVSA + "ms TOT:" + total + "ms";
 
-                    // 1. Convertiamo in pixel sul frame ORIGINALE
                     RectF rawPxBox = new RectF(
                             result.box.left * origW,
                             result.box.top * origH,
@@ -368,28 +438,22 @@ public class MainActivity extends AppCompatActivity {
                             result.box.bottom * origH
                     );
 
-                    // 2. Ruotiamo il box
                     RectF rotBox = rotateBoxForDisplay(rawPxBox, origW, origH, rotationDegrees);
 
-                    // 3. LA GEOMETRIA DEL FILL_CENTER
                     int viewW = viewFinder.getWidth();
                     int viewH = viewFinder.getHeight();
 
                     float scaleX = (float) viewW / rotatedFrameW;
                     float scaleY = (float) viewH / rotatedFrameH;
 
-                    // FILL_CENTER scala usando il lato che richiede l'ingrandimento maggiore
                     float maxScale = Math.max(scaleX, scaleY);
 
-                    // Calcoliamo le dimensioni del frame della telecamera una volta scalato
                     float scaledFrameW = rotatedFrameW * maxScale;
                     float scaledFrameH = rotatedFrameH * maxScale;
 
-                    // Calcoliamo l'offset (quanto frame viene tagliato fuori dallo schermo)
                     float offsetX = (scaledFrameW - viewW) / 2f;
                     float offsetY = (scaledFrameH - viewH) / 2f;
 
-                    // 4. Applichiamo la scala e l'offset al box ruotato
                     RectF finalUiBox = new RectF(
                             (rotBox.left * maxScale) - offsetX,
                             (rotBox.top * maxScale) - offsetY,
@@ -397,9 +461,9 @@ public class MainActivity extends AppCompatActivity {
                             (rotBox.bottom * maxScale) - offsetY
                     );
 
-                    // Inoltriamo i pixel esatti e calcolati all'Overlay
+                    String displayClass = result.className != null ? result.className.replace("_", " ") : "?";
                     fItems = Collections.singletonList(new TrackingOverlayView.DetectedItem(
-                            result.className.replace("_", " "),
+                            displayClass,
                             finalUiBox.left, finalUiBox.top,
                             finalUiBox.right, finalUiBox.bottom, bestSim));
 
@@ -426,10 +490,6 @@ public class MainActivity extends AppCompatActivity {
             Log.e(TAG, "Errore pipeline two-stage", e);
         }
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Multi‑shot Learning
-    // ═══════════════════════════════════════════════════════════════════
 
     private void showNameInputDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
@@ -462,9 +522,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void finishLearningEarly() {
+        String className = learningSessionManager.getPendingClassName();
+        int nFrames = learningSessionManager.getFramesCollected();
         double[] finalBundle = learningSessionManager.finish();
         if (finalBundle != null) {
-            saveBundleAsArchetype(learningSessionManager.getPendingClassName(), finalBundle);
+            saveBundleAsArchetype(className, finalBundle, nFrames);
         } else {
             runOnUiThread(() -> {
                 if (progressLearning != null) progressLearning.setVisibility(android.view.View.GONE);
@@ -487,21 +549,35 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void saveBundleAsArchetype(String className, double[] bundle) {
+    private void saveBundleAsArchetype(String className, double[] bundle, int framesCollected) {
         if (className == null || bundle == null) return;
 
         vsaBridge.normalizeL2(bundle);
+        int nNew = Math.max(1, framesCollected);
 
-        archetypesMAP.put(className, bundle);
-        VsaVector archetypeBSC = binarize(bundle);
+        double[] existing = archetypesMAP.get(className);
+        if (existing != null) {
+            int nOld = sampleCounts.containsKey(className) ? sampleCounts.get(className) : DEFAULT_SAMPLE_COUNT;
+            double[] combined = new double[VSA_DIM];
+            for (int i = 0; i < VSA_DIM; i++) {
+                combined[i] = existing[i] * nOld + bundle[i] * nNew;
+            }
+            vsaBridge.normalizeL2(combined);
+            archetypesMAP.put(className, combined);
+            sampleCounts.put(className, nOld + nNew);
+        } else {
+            archetypesMAP.put(className, bundle);
+            sampleCounts.put(className, nNew);
+        }
+
+        VsaVector archetypeBSC = binarize(archetypesMAP.get(className));
         archetypesBSC.put(className, archetypeBSC);
         saveAllArchetypesMAP();
 
-        int activeBits = 0;
-        for (int i = 0; i < 157; i++) {
-            activeBits += Long.bitCount(archetypeBSC.getBlocks()[i]);
-        }
-        Log.i(TAG, "ARCHETIPO CREATO: " + className + " | Bit attivi: " + activeBits + "/10000");
+        double bitPct = archetypeBSC.getBitOnePercentage();
+        int totalShots = sampleCounts.get(className);
+        Log.i(TAG, "ARCHETIPO " + (existing != null ? "AGGIORNATO" : "CREATO") + ": "
+                + className + " | Shot: " + totalShots + " | Bit‑1: " + String.format("%.1f%%", bitPct));
 
         runOnUiThread(() -> {
             if (progressLearning != null) progressLearning.setVisibility(android.view.View.GONE);
@@ -511,10 +587,6 @@ public class MainActivity extends AppCompatActivity {
             tvConfidence.setText(gpuConfigLabel);
         });
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Utility geometriche e VSA
-    // ═══════════════════════════════════════════════════════════════════
 
     private RectF rotateBoxForDisplay(RectF box, int frameW, int frameH, int rotationDegrees) {
         switch (rotationDegrees) {
@@ -578,7 +650,7 @@ public class MainActivity extends AppCompatActivity {
         if (sqArea <= 0) return;
         float paddingRatio = 1.0f - (objArea / sqArea);
         if (paddingRatio > 0.10f) {
-            for (int i = 0; i < FEATURE_DIM; i++) {
+            for (int i = 0; i < featureDim; i++) {
                 features[i] = Math.max(0.0f, features[i] - (blackPaddingSignature[i] * paddingRatio));
             }
         }
@@ -599,19 +671,19 @@ public class MainActivity extends AppCompatActivity {
         return new VsaVector(blocks);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // Persistenza archetipi
-    // ═══════════════════════════════════════════════════════════════════
-
     private synchronized void saveAllArchetypesMAP() {
         try (java.io.FileOutputStream fos = openFileOutput(USER_ARCHETYPES_FILE, Context.MODE_PRIVATE);
              java.io.DataOutputStream dos = new java.io.DataOutputStream(fos)) {
 
+            dos.writeInt(FILE_MAGIC);
             dos.writeInt(archetypesMAP.size());
             dos.writeInt(VSA_DIM);
 
             for (Map.Entry<String, double[]> entry : archetypesMAP.entrySet()) {
                 dos.writeUTF(entry.getKey());
+                int count = sampleCounts.containsKey(entry.getKey())
+                        ? sampleCounts.get(entry.getKey()) : DEFAULT_SAMPLE_COUNT;
+                dos.writeInt(count);
                 for (double v : entry.getValue()) dos.writeDouble(v);
             }
         } catch (Exception e) {
@@ -626,18 +698,31 @@ public class MainActivity extends AppCompatActivity {
         try (java.io.FileInputStream fis = new java.io.FileInputStream(file);
              java.io.DataInputStream dis = new java.io.DataInputStream(fis)) {
 
-            int numClasses = dis.readInt();
-            int dims = dis.readInt();
-            if (dims != VSA_DIM) {
-                file.delete();
-                return;
-            }
+            int firstInt = dis.readInt();
 
-            for (int i = 0; i < numClasses; i++) {
-                String name = dis.readUTF();
-                double[] vec = new double[VSA_DIM];
-                for (int d = 0; d < VSA_DIM; d++) vec[d] = dis.readDouble();
-                archetypesMAP.put(name, vec);
+            if (firstInt == FILE_MAGIC) {
+                int numClasses = dis.readInt();
+                int dims = dis.readInt();
+                if (dims != VSA_DIM) { file.delete(); return; }
+                for (int i = 0; i < numClasses; i++) {
+                    String name = dis.readUTF();
+                    int sampleCount = dis.readInt();
+                    double[] vec = new double[VSA_DIM];
+                    for (int d = 0; d < VSA_DIM; d++) vec[d] = dis.readDouble();
+                    archetypesMAP.put(name, vec);
+                    sampleCounts.put(name, sampleCount);
+                }
+            } else {
+                int numClasses = firstInt;
+                int dims = dis.readInt();
+                if (dims != VSA_DIM) { file.delete(); return; }
+                for (int i = 0; i < numClasses; i++) {
+                    String name = dis.readUTF();
+                    double[] vec = new double[VSA_DIM];
+                    for (int d = 0; d < VSA_DIM; d++) vec[d] = dis.readDouble();
+                    archetypesMAP.put(name, vec);
+                    sampleCounts.put(name, DEFAULT_SAMPLE_COUNT);
+                }
             }
         } catch (Exception e) {
             Log.e(TAG, "Errore caricamento MAP, cancello", e);
@@ -645,17 +730,50 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void loadBuiltInArchetypes() {
+        try (java.io.DataInputStream dis = new java.io.DataInputStream(
+                getAssets().open("vsa_archetypes.bin"))) {
+            int firstInt = dis.readInt();
+            int numClasses;
+            int dims;
+            if (firstInt == FILE_MAGIC) {
+                numClasses = dis.readInt();
+                dims = dis.readInt();
+            } else {
+                numClasses = firstInt;
+                dims = dis.readInt();
+            }
+            if (dims != VSA_DIM) {
+                Log.w(TAG, "vsa_archetypes.bin ha dimensione " + dims + " invece di " + VSA_DIM);
+                return;
+            }
+            for (int i = 0; i < numClasses; i++) {
+                String name = dis.readUTF();
+                int sampleCount = 0;
+                try {
+                    sampleCount = dis.readInt();
+                } catch (Exception e) {
+                    sampleCount = DEFAULT_SAMPLE_COUNT;
+                }
+                double[] vec = new double[VSA_DIM];
+                for (int d = 0; d < VSA_DIM; d++) vec[d] = dis.readDouble();
+                archetypesMAP.put(name, vec);
+                sampleCounts.put(name, sampleCount);
+            }
+            Log.i(TAG, "Caricati " + numClasses + " archetipi predefiniti da vsa_archetypes.bin");
+        } catch (Exception e) {
+            Log.w(TAG, "vsa_archetypes.bin non trovato o illeggibile: " + e.getMessage());
+        }
+    }
+
     private synchronized void clearArchetypes() {
         archetypesMAP.clear();
         archetypesBSC.clear();
+        sampleCounts.clear();
         java.io.File file = new java.io.File(getFilesDir(), USER_ARCHETYPES_FILE);
         if (file.exists()) file.delete();
         Log.d(TAG, "Archetipi cancellati — pronti per nuovo training");
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Lifecycle
-    // ═══════════════════════════════════════════════════════════════════
 
     @Override
     protected void onDestroy() {
@@ -665,4 +783,43 @@ public class MainActivity extends AppCompatActivity {
         if (encoder != null) encoder.close();
         inferenceExecutor.shutdown();
     }
+
+
+
+    private void testCloudConnection() {
+        Log.d(TAG, "Avvio del test di connessione al Cloud...");
+
+        // 1. Prendiamo l'interfaccia API dal nostro client ed eseguiamo la richiesta per la lista moduli
+        RetrofitClient.getApi().getAllModules().enqueue(new Callback<List<ModuleBundleDTO>>() {
+
+            @Override
+            public void onResponse(Call<List<ModuleBundleDTO>> call, Response<List<ModuleBundleDTO>> response) {
+                // Questo metodo viene eseguito se il server risponde (anche se risponde con un errore tipo 404 o 500)
+                if (response.isSuccessful() && response.body() != null) {
+                    List<ModuleBundleDTO> listaModuli = response.body();
+
+                    Log.d(TAG, "CONNESSO! Ricevuti " + listaModuli.size() + " moduli dal database.");
+
+                    // Stampiamo nei log il nome di ogni modulo per verifica
+                    for (ModuleBundleDTO modulo : listaModuli) {
+                        Log.d(TAG, " -> Modulo ID: " + modulo.moduleName + " | Visibilità: " + modulo.visibility);
+                    }
+
+                    // Mostriamo un piccolo messaggio a schermo sul telefono
+                    Toast.makeText(MainActivity.this, "Connesso a VSHub Cloud!", Toast.LENGTH_SHORT).show();
+                } else {
+                    Log.e(TAG, "Il server ha risposto, ma con un errore. Codice: " + response.code());
+                }
+            }
+
+            @Override
+            public void onFailure(Call<List<ModuleBundleDTO>> call, Throwable t) {
+                // Questo metodo viene eseguito se la chiamata non è riuscita a raggiungere il server
+                // (es. Wi-Fi spento, IP sbagliato nel RetrofitClient, Tomcat spento)
+                Log.e(TAG, "ERRORE CRITICO DI CONNESSIONE: " + t.getMessage());
+                Toast.makeText(MainActivity.this, "Impossibile raggiungere il server Cloud", Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
 }

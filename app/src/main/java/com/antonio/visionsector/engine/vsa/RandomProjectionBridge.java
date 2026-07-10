@@ -153,4 +153,33 @@ public class RandomProjectionBridge {
             }
         }
     }
+
+    public boolean[][] getProjectionMatrix() {
+        return projectionMatrix;
+    }
+
+    public void projectFeatureVectorCentered(float[] features, float[] globalMean, double[] outContinuous) {
+        for (int d = 0; d < vsaDimensions; d++) {
+            boolean[] row = projectionMatrix[d];
+            double sum = 0.0;
+            for (int i = 0; i < cnnFeatureSize; i++) {
+                float val = features[i] - globalMean[i];
+                if (row[i]) sum += val;
+                else        sum -= val;
+            }
+            outContinuous[d] = sum;
+        }
+    }
+
+    public void projectDense(float[] normalizedFeatures, double[] outContinuous) {
+        for (int d = 0; d < vsaDimensions; d++) {
+            boolean[] row = projectionMatrix[d];
+            double sum = 0.0;
+            for (int i = 0; i < cnnFeatureSize; i++) {
+                if (row[i]) sum += normalizedFeatures[i];
+                else        sum -= normalizedFeatures[i];
+            }
+            outContinuous[d] = sum;
+        }
+    }
 }

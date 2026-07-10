@@ -103,8 +103,7 @@ public class LearningSessionManager {
     }
 
     /**
-     * Restituisce il vettore bundlato e resetta lo stato.
-     * Da chiamare dopo che addFrame() ha restituito true.
+     * Restituisce il vettore bundlato VSA e resetta lo stato.
      */
     public synchronized double[] getFinalBundleAndReset() {
         if (framesCollected == 0) {
@@ -113,6 +112,7 @@ public class LearningSessionManager {
             return null;
         }
         double[] finalResult = bundleVector.clone();
+
         String name = pendingClassName;
         int collected = framesCollected;
         reset();
@@ -135,16 +135,11 @@ public class LearningSessionManager {
         Arrays.fill(bundleVector, 0.0);
     }
 
-    // ── Getters ────────────────────────────────────────────────────────
-
     public synchronized State getCurrentState() { return currentState; }
     public synchronized int getFramesCollected() { return framesCollected; }
     public synchronized int getTargetFrames() { return targetFrames; }
     public synchronized String getPendingClassName() { return pendingClassName; }
 
-    /**
-     * Restituisce il progresso come frazione [0.0, 1.0].
-     */
     public synchronized float getProgress() {
         if (targetFrames <= 0) return 0f;
         return Math.min(1f, (float) framesCollected / targetFrames);

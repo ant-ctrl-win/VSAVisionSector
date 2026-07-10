@@ -66,6 +66,11 @@ dependencies {
         exclude(group = "com.google.ai.edge.litert", module = "litert-api")
     }
 
+    // Retrofit per le chiamate REST
+    implementation("com.squareup.retrofit2:retrofit:2.9.0")
+    // Convertitore JSON (puoi usare Gson o Jackson, Gson è il più veloce su Android)
+    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+
     // ── CameraX ────────────────────────────────────────────────────────
     val cameraxVersion = "1.3.4"
     implementation("androidx.camera:camera-core:$cameraxVersion")

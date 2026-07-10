@@ -3,7 +3,7 @@
 **App**: VsaVisionSector — Object Detection + Multi‑Shot Learning basato su VSA/BSC  
 **Piattaforma**: Android (TFLite, GPU Delegate, CameraX, MediaPipe)  
 **Linguaggio**: Java 11  
-**Data analisi**: 2026‑06‑21
+**Data analisi**: 2026‑06‑26
 
 📂 **Struttura dei package attuale**:
 ```
@@ -34,6 +34,8 @@ com.antonio.visionsector
 ### 1.1 Origine dell'immagine
 
 L'immagine proviene **esclusivamente dalla fotocamera posteriore**, tramite CameraX. Non è implementata la selezione da galleria. **Non è più usato `ImageCapture`** — l'apprendimento avviene in streaming dai frame dell'`ImageAnalysis`, senza scattare foto.
+
+Ulteriori file modello presenti in `assets/` ma non utilizzati dalla pipeline attiva sono elencati nel §16.
 
 ```java
 // MainActivity.java:219-221
@@ -775,10 +777,11 @@ Esiste negli assets ma **non caricato** dalla pipeline attuale. Residuo di versi
     │     → normalizeL2(bundle)    │                      │
     │     → save MAP + BSC          │                      ▼
     └──────────────────────────────┘       ┌──────────────────────────────┐
-                                           │         UI RENDERING          │
-                                           │  • tvVerdict + tvConfidence   │
-                                           │  • TrackingOverlayView        │
-                                           │  • Rotazione box per display  │
+                                            │         UI RENDERING          │
+                                            │  • RotateBoxForDisplay        │
+                                            │  • Fill Center scaling        │
+                                            │  • tvVerdict + tvConfidence   │
+                                            │  • TrackingOverlayView        │
                                            └──────────────────────────────┘
 ```
 
@@ -803,19 +806,21 @@ private void showNameInputDialog() {
     final EditText input = new EditText(this);
     input.setHint("Es. Vite_M5");
     builder.setView(input);
-    builder.setPositiveButton("Avvia Acquisizione", (dialog, which) -> {
-        String name = input.getText().toString().trim();
-        if (!name.isEmpty()) {
-            learningSessionManager.startLearning(name);   // → State: COLLECTING
-            runOnUiThread(() -> {
-                progressLearning.setVisibility(View.VISIBLE);
-                progressLearning.setProgress(0);
-                fabLearn.setImageResource(android.R.drawable.ic_media_pause);
-                Toast.makeText(MainActivity.this,
-                        "Inquadra l'oggetto. Premi + per terminare.", Toast.LENGTH_LONG).show();
-            });
-        }
-    });
+        builder.setPositiveButton("Avvia Acquisizione", (dialog, which) -> {
+            String name = input.getText().toString().trim();
+            if (!name.isEmpty()) {
+                learningSessionManager.startLearning(name);   // → State: COLLECTING
+                runOnUiThread(() -> {
+                    progressLearning.setVisibility(View.VISIBLE);
+                    progressLearning.setProgress(0);
+                    fabLearn.setImageResource(android.R.drawable.ic_media_pause);
+                    Toast.makeText(MainActivity.this,
+                            "Inquadra l'oggetto. Premi + per terminare.", Toast.LENGTH_LONG).show();
+                });
+            } else {
+                Toast.makeText(MainActivity.this, "Il nome non può essere vuoto", Toast.LENGTH_SHORT).show();
+            }
+        });
     builder.setNegativeButton("Annulla", (dialog, which) -> dialog.cancel());
     builder.show();
 }
@@ -858,7 +863,14 @@ if (learningSessionManager.getCurrentState() == State.COLLECTING) {
     frame.recycle();
     return;  // ← esce senza eseguire inferenza/stabilizzazione
 }
+
+// Se l'SSD non trova l'oggetto durante COLLECTING, si avvisa senza interrompere:
+} else if (learningSessionManager.getCurrentState() == State.COLLECTING) {
+    runOnUiThread(() -> tvConfidence.setText("Oggetto perso — inquadralo di nuovo"));
+}
 ```
+
+I frame in cui l'SSD non rileva nulla vengono saltati senza far avanzare il conteggio shot. Solo i frame con detection valida contribuiscono al bundling.
 
 #### Passo 3: Bundling additivo
 
@@ -1037,18 +1049,22 @@ Confidence: "SSD:GPU Enc:GPU | SSD+45ms VSA:12ms TOT:67ms"
 
 ### 9.3 UI confidence e ProgressBar
 
-La `ProgressBar` orizzontale (verde, `progressTint="#2E7D32"`) mostra il progresso durante l'apprendimento:
+La `ProgressBar` orizzontale (verde, `progressTint="#2E7D32"`) mostra il progresso durante l'apprendimento. La `ProgressBar` ha anche un background tint `progressBackgroundTint="#3A3A44"`:
 
 ```java
-// activity_main.xml:63-69
+// activity_main.xml:63-70
 <ProgressBar
     android:id="@+id/progressLearning"
     style="?android:attr/progressBarStyleHorizontal"
     android:layout_width="match_parent"
     android:layout_height="6dp"
+    android:layout_marginTop="8dp"
     android:visibility="gone"
-    android:progressTint="#2E7D32" />
+    android:progressTint="#2E7D32"
+    android:progressBackgroundTint="#3A3A44" />
 ```
+
+Per i dettagli avanzati del `DetectionStabilizer` (reset anti‑ghosting su salto centro >20%, sanity check box interno con clamp a [0,1], coasting a 6 frame, majority voting a 5 frame) si veda il §14.
 
 ---
 
@@ -1069,13 +1085,16 @@ La `ProgressBar` orizzontale (verde, `progressTint="#2E7D32"`) mostra il progres
 | **RandomProjectionBridge.java** | Proiezione 1280→10000 (±1), zero‑skipping, L2 normalization, projectToContinuous, binarizeTo(), projectSpatialCellToContinuous | `engine.vsa` | `app/src/main/java/.../visionsector/engine/vsa/RandomProjectionBridge.java` |
 | **VsaVector.java** | Ipervettore BSC: XOR binding, Hamming (POPCNT), cosine similarity, setBlocks zero‑alloc | `engine.vsa` | `app/src/main/java/.../visionsector/engine/vsa/VsaVector.java` |
 | **DatasetStatTracker.java** | Z‑Score standardization (pronto, non cablato) | `engine.vsa` | `app/src/main/java/.../visionsector/engine/vsa/DatasetStatTracker.java` |
-| **DetectionStabilizer.java** | EMA smoothing spaziale + majority voting semantico + coasting | `ui` | `app/src/main/java/.../visionsector/ui/DetectionStabilizer.java` |
+| **DetectionStabilizer.java** | EMA smoothing spaziale + majority voting semantico + coasting + reset anti‑ghosting su salto >20% + sanity check box interno | `ui` | `app/src/main/java/.../visionsector/ui/DetectionStabilizer.java` |
 | **TrackingOverlayView.java** | View bounding box con aspect‑ratio fit, dim mask, etichette | `ui` | `app/src/main/java/.../visionsector/ui/TrackingOverlayView.java` |
 | **AntiGlareFilter.java** | Filtro LUT gamma 1.4 (pronto, non cablato) | `utils` | `app/src/main/java/.../visionsector/utils/AntiGlareFilter.java` |
 | **mobilenet_ssd.tflite** | Modello SSD Object Detection | assets | `app/src/main/assets/mobilenet_ssd.tflite` |
 | **mobilenet_vsa.tflite** | Modello MobileNetV2 encoder feature | assets | `app/src/main/assets/mobilenet_vsa.tflite` |
 | **vsa_archetypes.bin** | Archetipi pre‑addestrati (asset, non caricati) | assets | `app/src/main/assets/vsa_archetypes.bin` |
 | **vsa_stats.bin** | Statistiche Z‑Score (asset, non usate) | assets | `app/src/main/assets/vsa_stats.bin` |
+| **mobilenet_ssd_Generic.tflite** | Variante SSD generica (asset, non usata) | assets | `app/src/main/assets/mobilenet_ssd_Generic.tflite` |
+| **mobilenet_v2_spatial.tflite** | MobileNetV2 output spaziale 7×7 (asset, non usato) | assets | `app/src/main/assets/mobilenet_v2_spatial.tflite` |
+| **test_foglia.jpg** | Immagine di test (asset, non usata) | assets | `app/src/main/assets/test_foglia.jpg` |
 | **archetype_map.bin** | Persistenza runtime archetipi | internal storage | `getFilesDir()/archetype_map.bin` |
 | **activity_main.xml** | Layout: PreviewView, FAB, CardView, ProgressBar, TrackingOverlayView | res | `app/src/main/res/layout/activity_main.xml` |
 | **build.gradle.kts** | Dipendenze: TFLite 2.16.1 + GPU, MediaPipe 0.10.14 (escluso LiteRT), CameraX 1.3.4 | | `app/build.gradle.kts` |
@@ -1119,4 +1138,244 @@ La `ProgressBar` orizzontale (verde, `progressTint="#2E7D32"`) mostra il progres
 
 ---
 
-*Documento generato il 2026‑06‑20 dall'analisi completa del codice sorgente Android.*
+## 13. Mapping del box normalizzato allo schermo (Rotazione + Fill Center)
+
+La conversione dal box normalizzato `[0,1]` del rivelatore SSD alle coordinate pixel sullo schermo è una pipeline a 5 passi, implementata in `MainActivity.processCameraFrame()`:
+
+```
+RectF[0,1]  →  pixel frame originale  →  rotazione  →  FILL_CENTER  →  schermo
+```
+
+### 13.1 Step 1: Da normalizzato a pixel sul frame originale
+
+```java
+// MainActivity.java:364-369
+RectF rawPxBox = new RectF(
+    result.box.left * origW,
+    result.box.top * origH,
+    result.box.right * origW,
+    result.box.bottom * origH
+);
+```
+
+### 13.2 Step 2: Dimensioni del frame ruotato
+
+Il sensore fotocamera può ruotare di 0°, 90°, 180° o 270°. Le dimensioni effettive del frame dopo la rotazione vengono calcolate come:
+
+```java
+// MainActivity.java:356-358
+final int rotatedFrameW = (rotationDegrees == 90 || rotationDegrees == 270) ? origH : origW;
+final int rotatedFrameH = (rotationDegrees == 90 || rotationDegrees == 270) ? origW : origH;
+```
+
+Per rotazioni di 90°/270°, larghezza e altezza del sensore sono scambiate.
+
+### 13.3 Step 3: Rotazione del box (`rotateBoxForDisplay`)
+
+Il metodo applica una trasformazione affine discreta (riflessione + traslazione) per ciascun angolo:
+
+```java
+// MainActivity.java:519-530
+private RectF rotateBoxForDisplay(RectF box, int frameW, int frameH, int rotationDegrees) {
+    switch (rotationDegrees) {
+        case 90:
+            return new RectF(frameH - box.bottom, box.left, frameH - box.top, box.right);
+        case 180:
+            return new RectF(frameW - box.right, frameH - box.bottom, frameW - box.left, frameH - box.top);
+        case 270:
+            return new RectF(box.top, frameW - box.right, box.bottom, frameW - box.left);
+        default:  // 0°
+            return new RectF(box);
+    }
+}
+```
+
+| Rotazione | Trasformazione |
+|-----------|---------------|
+| 0° | `(x, y) → (x, y)` — identità |
+| 90° | `(x, y) → (H − y, x)` |
+| 180° | `(x, y) → (W − x, H − y)` |
+| 270° | `(x, y) → (y, W − x)` |
+
+### 13.4 Step 4: Geometria FILL\_CENTER di PreviewView
+
+CameraX `PreviewView` usa `ScaleType.FILL_CENTER` di default, che scala il frame in modo da riempire completamente la view, ritagliando le parti in eccesso. La scala è la maggiore tra i due assi:
+
+```java
+// MainActivity.java:378-382
+float scaleX = (float) viewW / rotatedFrameW;
+float scaleY = (float) viewH / rotatedFrameH;
+float maxScale = Math.max(scaleX, scaleY);  // FILL_CENTER
+```
+
+Le dimensioni del frame ingrandito e l'offset per eccesso (la porzione che fuoriesce dallo schermo) sono:
+
+```java
+// MainActivity.java:385-390
+float scaledFrameW = rotatedFrameW * maxScale;
+float scaledFrameH = rotatedFrameH * maxScale;
+float offsetX = (scaledFrameW - viewW) / 2f;
+float offsetY = (scaledFrameH - viewH) / 2f;
+```
+
+### 13.5 Step 5: Applicazione scala e offset al box ruotato
+
+```java
+// MainActivity.java:393-398
+RectF finalUiBox = new RectF(
+    (rotBox.left * maxScale) - offsetX,
+    (rotBox.top * maxScale) - offsetY,
+    (rotBox.right * maxScale) - offsetX,
+    (rotBox.bottom * maxScale) - offsetY
+);
+```
+
+### 13.6 Riepilogo formula completa
+
+Il mapping finale è composto da due trasformazioni composte:
+
+1. **Rotazione** $R_\theta(x, y)$ del box sul piano del sensore
+2. **Scala + offset** $S(x, y) = (x \cdot M - \Delta_x, \; y \cdot M - \Delta_y)$ con $M = \max\!\left(\frac{W_{view}}{W_{rot}}, \frac{H_{view}}{H_{rot}}\right)$ e $(\Delta_x, \Delta_y)$ = metà del frame in eccesso
+
+$$
+\boxed{
+\text{finalUiBox} = S \circ R_\theta \circ N^{-1}(\text{boxNorm})
+}
+$$
+
+dove $N^{-1}$ è la de‑normalizzazione per le dimensioni originali del frame.
+
+### 13.7 Coordinate passate all'Overlay
+
+Il `RectF` finale, contenente coordinate in pixel assoluti sullo schermo, viene inoltrato a `TrackingOverlayView`:
+
+```java
+// MainActivity.java:401-404
+fItems = Collections.singletonList(new TrackingOverlayView.DetectedItem(
+    result.className.replace("_", " "),
+    finalUiBox.left, finalUiBox.top,
+    finalUiBox.right, finalUiBox.bottom, bestSim));
+```
+
+`TrackingOverlayView.onDraw()` usa queste coordinate direttamente su `Canvas`, senza ulteriori trasformazioni, poiché sono già in pixel view.
+
+---
+
+## 14. DetectionStabilizer — Dettagli avanzati
+
+### 14.1 Reset anti‑ghosting su salto del centro
+
+Quando il centro del box si sposta di oltre il 20% dello schermo tra due frame consecutivi, l'EMA spaziale viene azzerata per evitare l'effetto "fantasma" (trascinamento del box vecchio):
+
+```java
+// DetectionStabilizer.java:92-98
+float centerDistX = Math.abs(currentSmoothedBox.centerX() - newBox.centerX());
+float centerDistY = Math.abs(currentSmoothedBox.centerY() - newBox.centerY());
+
+if (centerDistX > 0.2f || centerDistY > 0.2f) {
+    currentSmoothedBox = new RectF(newBox);    // salto → reset
+} else {
+    // EMA smoothing normale (SMOOTHING_FACTOR = 0.3)
+}
+```
+
+Senza questo meccanismo, un rapido movimento del telefono produrrebbe una scia di box intermedi per diversi frame.
+
+### 14.2 Sanity check interno del box
+
+Oltre al controllo `isBoxSane()` eseguito in `MainActivity`, il `DetectionStabilizer` applica un proprio filtro indipendente:
+
+```java
+// DetectionStabilizer.java:53-67
+RectF clamped = new RectF(
+    Math.max(0f, Math.min(1f, newBox.left)),   // clamp [0,1]
+    Math.max(0f, Math.min(1f, newBox.top)),
+    Math.max(0f, Math.min(1f, newBox.right)),
+    Math.max(0f, Math.min(1f, newBox.bottom))
+);
+float area = clamped.width() * clamped.height();
+if (area > MAX_BOX_AREA_RATIO || area < MIN_BOX_AREA_RATIO) {
+    newBox = null;   // scarta: area > 80% o < 1%
+    newClassName = null;
+}
+```
+
+Costanti: `MAX_BOX_AREA_RATIO = 0.80f`, `MIN_BOX_AREA_RATIO = 0.01f`.
+
+### 14.3 Coasting (inerzia)
+
+Quando l'SSD perde temporaneamente l'oggetto, il `DetectionStabilizer` mantiene il box e la classe precedenti per un massimo di `MAX_MISSING_FRAMES = 6` fotogrammi (~100 ms a 60 fps), dopodiché resetta tutto:
+
+```java
+// DetectionStabilizer.java:70-81
+if (newBox == null || newClassName == null) {
+    missingFramesCount++;
+    if (missingFramesCount >= MAX_MISSING_FRAMES) {
+        reset();
+        return new StabilizedResult(null, null, false);
+    } else {
+        // Coasting: mantiene box e classe precedenti
+        String votedClass = getMajorityClass();
+        return new StabilizedResult(currentSmoothedBox, votedClass, true);
+    }
+}
+```
+
+### 14.4 Majority voting semantico
+
+La classe predetta viene filtrata con voto a maggioranza su una finestra mobile di `HISTORY_SIZE = 5` frame, eliminando fluttuazioni spurie del classificatore VSA.
+
+---
+
+## 15. Feedback durante l'apprendimento
+
+### 15.1 Validazione nome vuoto
+
+Se l'utente preme "Avvia Acquisizione" senza inserire un nome, viene mostrato un Toast di errore e la sessione non parte:
+
+```java
+// MainActivity.java:456-458
+} else {
+    Toast.makeText(MainActivity.this, "Il nome non può essere vuoto", Toast.LENGTH_SHORT).show();
+}
+```
+
+### 15.2 Oggetto perso durante l'apprendimento
+
+Se l'SSD non trova l'oggetto mentre lo stato è `COLLECTING`, la UI avvisa l'utente senza interrompere la sessione:
+
+```java
+// MainActivity.java:341-343
+} else if (learningSessionManager.getCurrentState() == LearningSessionManager.State.COLLECTING) {
+    runOnUiThread(() -> tvConfidence.setText("Oggetto perso — inquadralo di nuovo"));
+}
+```
+
+I frame senza detection vengono semplicemente saltati; il conteggio shot non avanza.
+
+### 15.3 Salto dei frame di inferenza e update UI
+
+Durante la raccolta (`COLLECTING`), la pipeline esce prima di eseguire lo stabilizzatore e l'aggiornamento UI dell'overlay — solo il testo di stato viene aggiornato:
+
+```java
+// MainActivity.java:320-321
+frame.recycle();
+return;  // ← salta inferenza, stabilizzazione, tracking overlay
+```
+
+---
+
+## 16. File asset aggiuntivi non utilizzati
+
+Oltre ai modelli attivi elencati (§11), la cartella `app/src/main/assets/` contiene file residui di versioni precedenti o per uso futuro:
+
+| File | Descrizione | Stato |
+|------|------------|-------|
+| `mobilenet_ssd_Generic.tflite` | Variante SSD generica (non fine‑tuned su DUTS) | Non utilizzato |
+| `mobilenet_v2_spatial.tflite` | MobileNetV2 con output spaziale (7×7 grid) | Non utilizzato |
+| `test_foglia.jpg` | Immagine di test (foglia) | Non utilizzato |
+| `vsa_archetypes.bin` | Archetipi pre‑addestrati | Presente, non caricato |
+
+---
+
+*Documento aggiornato il 2026‑06‑26 dall'analisi completa del codice sorgente Android.*
