@@ -10,9 +10,10 @@ import com.antonio.visionsector.engine.learning.LearningSessionManager;
 
 import com.antonio.visionsector.network.RetrofitClient;
 import com.antonio.visionsector.network.dto.ModuleBundleDTO;
-
+import com.antonio.visionsector.utils.LocalStorageManager;
 
 import android.Manifest;
+import android.app.ProgressDialog;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -52,6 +53,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -789,24 +791,22 @@ public class MainActivity extends AppCompatActivity {
     private void testCloudConnection() {
         Log.d(TAG, "Avvio del test di connessione al Cloud...");
 
-        // 1. Prendiamo l'interfaccia API dal nostro client ed eseguiamo la richiesta per la lista moduli
         RetrofitClient.getApi().getAllModules().enqueue(new Callback<List<ModuleBundleDTO>>() {
 
             @Override
             public void onResponse(Call<List<ModuleBundleDTO>> call, Response<List<ModuleBundleDTO>> response) {
-                // Questo metodo viene eseguito se il server risponde (anche se risponde con un errore tipo 404 o 500)
                 if (response.isSuccessful() && response.body() != null) {
                     List<ModuleBundleDTO> listaModuli = response.body();
 
                     Log.d(TAG, "CONNESSO! Ricevuti " + listaModuli.size() + " moduli dal database.");
 
-                    // Stampiamo nei log il nome di ogni modulo per verifica
                     for (ModuleBundleDTO modulo : listaModuli) {
                         Log.d(TAG, " -> Modulo ID: " + modulo.moduleName + " | Visibilità: " + modulo.visibility);
                     }
 
-                    // Mostriamo un piccolo messaggio a schermo sul telefono
                     Toast.makeText(MainActivity.this, "Connesso a VSHub Cloud!", Toast.LENGTH_SHORT).show();
+
+                    aggiornaInterfacciaModuli(listaModuli);
                 } else {
                     Log.e(TAG, "Il server ha risposto, ma con un errore. Codice: " + response.code());
                 }
@@ -814,12 +814,63 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onFailure(Call<List<ModuleBundleDTO>> call, Throwable t) {
-                // Questo metodo viene eseguito se la chiamata non è riuscita a raggiungere il server
-                // (es. Wi-Fi spento, IP sbagliato nel RetrofitClient, Tomcat spento)
                 Log.e(TAG, "ERRORE CRITICO DI CONNESSIONE: " + t.getMessage());
                 Toast.makeText(MainActivity.this, "Impossibile raggiungere il server Cloud", Toast.LENGTH_LONG).show();
             }
         });
+    }
+
+    private void aggiornaInterfacciaModuli(List<ModuleBundleDTO> moduliDalServer) {
+        Set<Long> moduliLocali = LocalStorageManager.getDownloadedModuleIds(MainActivity.this);
+
+        for (ModuleBundleDTO mod : moduliDalServer) {
+            if (moduliLocali.contains(mod.getModuleId())) {
+                Log.d(TAG, "Modulo " + mod.getModuleName() + " è disponibile LOCALMENTE.");
+            } else {
+                Log.d(TAG, "Modulo " + mod.getModuleName() + " è solo sul SERVER.");
+            }
+        }
+    }
+
+    private void scaricaModuloDalServer(Long moduleId) {
+        ProgressDialog progress = new ProgressDialog(this);
+        progress.setMessage("Scaricamento modulo VSA in corso...");
+        progress.show();
+
+        RetrofitClient.getApi().getModuleBundle(moduleId).enqueue(new Callback<ModuleBundleDTO>() {
+            @Override
+            public void onResponse(Call<ModuleBundleDTO> call, Response<ModuleBundleDTO> response) {
+                progress.dismiss();
+                if (response.isSuccessful() && response.body() != null) {
+                    ModuleBundleDTO bundle = response.body();
+
+                    boolean salvato = LocalStorageManager.saveModuleBundle(MainActivity.this, bundle);
+
+                    if (salvato) {
+                        Toast.makeText(MainActivity.this, "Modulo " + bundle.getModuleName() + " scaricato con successo!", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Errore nel salvataggio locale", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+
+            @Override
+            public void onFailure(Call<ModuleBundleDTO> call, Throwable t) {
+                progress.dismiss();
+                Toast.makeText(MainActivity.this, "Errore di rete: " + t.getMessage(), Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private void attivaModuloSelezionato(Long moduleId) {
+        ModuleBundleDTO moduloAttivo = LocalStorageManager.loadLocalModuleBundle(this, moduleId);
+        if (moduloAttivo != null) {
+            Log.d(TAG, "Inizializzazione motore VSA per il modulo: " + moduloAttivo.getModuleName());
+
+            Toast.makeText(this, "Modulo " + moduloAttivo.getModuleName() + " Attivato!", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "Impossibile caricare il modulo dal disco", Toast.LENGTH_SHORT).show();
+        }
     }
 
 }
