@@ -1,0 +1,66 @@
+{
+  "deterministicInput": {
+    "distribution": "numpy default_rng standard_normal * 2.0",
+    "samples": 4,
+    "seed": 0,
+    "shape": [
+      4,
+      224,
+      224,
+      3
+    ]
+  },
+  "input": {
+    "dtype": "float32",
+    "layout": "NHWC",
+    "note": "deterministic tensors only; no image resize, crop or preprocessing",
+    "shape": [
+      1,
+      224,
+      224,
+      3
+    ]
+  },
+  "output": {
+    "dtype": "float32",
+    "layout": "NC",
+    "pooling": "adaptive_avg_pool2d(features, 1).flatten(1)",
+    "semantic": "global average pooled backbone embedding; ImageNet logits and pre-logits head excluded",
+    "shape": [
+      1,
+      960
+    ]
+  },
+  "packages": {
+    "ai-edge-litert": "2.2.0",
+    "huggingface_hub": "1.33.0",
+    "litert-torch": "0.9.4",
+    "numpy": "2.5.2",
+    "python": "3.13.16",
+    "safetensors": "0.8.0",
+    "timm": "1.0.30",
+    "torch": "2.11.0+cpu",
+    "torchvision": "0.26.0+cpu"
+  },
+  "parity": {
+    "cosine_similarity_mean": 0.9999999999732869,
+    "cosine_similarity_min": 0.9999999999602538,
+    "embedding_dim": 960,
+    "max_abs_error": 2.1979212760925293e-06,
+    "mean_abs_error": 2.2774430874505926e-08,
+    "samples": 4
+  },
+  "schemaVersion": 1,
+  "source": {
+    "classifier": "bypassed; ImageNet classifier and pre-logits hidden head are not used",
+    "embeddingDim": 960,
+    "hfRevision": "331fb803779522b685cf942e15f914fb6741c1eb",
+    "model": "timm/mobilenetv4_conv_small.e2400_r224_in1k",
+    "pretrained": true
+  },
+  "tflite": {
+    "bytes": 5141156,
+    "file": "mobilenetv4_conv_small_encoder.tflite",
+    "sha256": "7f5d8d7796c5a48987748bb1cad6c9e20788e6b92fd7d4d5f9c011d8caa90f15"
+  }
+}
